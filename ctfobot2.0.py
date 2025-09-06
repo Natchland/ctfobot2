@@ -37,6 +37,15 @@ PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
+LABEL_ROLE_IDS = [
+    1377075930144571452,
+    1380233234675400875,
+    1379918816871448686,
+    1380233086544908428,
+    1377077466513932338,
+    1377084533706588201,
+]
+
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
@@ -204,16 +213,21 @@ class AddCodeButton(discord.ui.Button):
         super().__init__(label="Add Code", style=discord.ButtonStyle.success, custom_id="add_code")
 
     async def callback(self, interaction: discord.Interaction):
-        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        all_roles = [interaction.guild.get_role(rid) for rid in LABEL_ROLE_IDS]
+        all_roles = [r for r in all_roles if r is not None]
         print("AddCodeButton callback called - all_roles:", all_roles)
-        await interaction.response.send_message("Select the label role for the code and click Continue:", view=AddCodeLabelView(all_roles), ephemeral=True)
+        await interaction.response.send_message(
+            "Select the label role for the code and click Continue:",
+            view=AddCodeLabelView(all_roles),
+            ephemeral=True
+        )
 
 class UpdateCodeButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Update Code", style=discord.ButtonStyle.primary, custom_id="update_code")
 
     async def callback(self, interaction: discord.Interaction):
-        label_roles = [interaction.guild.get_role(int(rid)) for rid in codes.keys() if interaction.guild.get_role(int(rid))]
+        label_roles = [interaction.guild.get_role(rid) for rid in LABEL_ROLE_IDS if interaction.guild.get_role(rid)]
         if not label_roles:
             return await interaction.response.send_message("No codes exist yet.", ephemeral=True)
         await interaction.response.send_message("Select a code to update:", view=UpdateCodeLabelView(label_roles), ephemeral=True)
@@ -275,7 +289,7 @@ class RemoveCodeButton(discord.ui.Button):
         super().__init__(label="Remove Code", style=discord.ButtonStyle.danger, custom_id="remove_code")
 
     async def callback(self, interaction: discord.Interaction):
-        label_roles = [interaction.guild.get_role(int(rid)) for rid in codes.keys() if interaction.guild.get_role(int(rid))]
+        label_roles = [interaction.guild.get_role(rid) for rid in LABEL_ROLE_IDS if interaction.guild.get_role(rid)]
         if not label_roles:
             return await interaction.response.send_message("No codes exist yet.", ephemeral=True)
         await interaction.response.send_message("Select a code to remove:", view=RemoveCodeView(label_roles), ephemeral=True)
@@ -327,7 +341,6 @@ def save_reviewers() -> None:
 
 load_reviewers()
 
-# ══ ACTIVITY TRACKER (load/save) ════════════
 activity: Dict[str, Dict[str, Any]] = {}
 
 def load_activity() -> None:
@@ -1041,7 +1054,6 @@ async def memberform(inter: discord.Interaction):
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
 
-# ══ READY HANDLER, AUTOSAVE ETC ═════════════
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
