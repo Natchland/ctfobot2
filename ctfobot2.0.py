@@ -7,11 +7,6 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Set, Any
 from random import choice
 
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-bot = commands.Bot("!", intents=intents)
-
 # ══════════════════════════════════════════════════════════════════
 #  Configuration (IDs can stay hard-coded; secrets via env vars)
 # ══════════════════════════════════════════════════════════════════
@@ -54,6 +49,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
 CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
+
+# ══════════════════════════════════════════════════════════════════
+#  Bot / intents
+# ══════════════════════════════════════════════════════════════════
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+bot = commands.Bot("!", intents=intents)
+
+bot.review_team = set()
+bot.last_anonymous_time = {}
+bot.giveaway_stop_events = {}
 
 # ══════════════════════════════════════════════════════════════════
 #  CODE SYSTEM: Role-based Codes Storage & UI
@@ -303,10 +310,6 @@ async def codes_command(inter: discord.Interaction):
 # ══════════════════════════════════════════════════════════════════
 #  Reviewer List helpers
 # ══════════════════════════════════════════════════════════════════
-bot.review_team = set()  # type: Set[int]
-bot.last_anonymous_time = {}  # type: Dict[int, datetime]
-bot.giveaway_stop_events = {}  # type: Dict[int, asyncio.Event]
-
 def load_reviewers() -> None:
     if os.path.isfile(REVIEW_FILE):
         try:
