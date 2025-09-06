@@ -1,8 +1,31 @@
 {
+  // Build phase – still Nixpacks
   "build": {
     "builder": "NIXPACKS"
   },
+
+  // Deploy / runtime settings
   "deploy": {
-    "startCommand": "python ctfobot2.0.py"
-  }
+    "startCommand": "python bot.py",
+
+    // disable the automatic web health-check
+    "healthcheckPath": null,
+
+    // RESOURCE LIMITS  ───────────────────────────────
+    // 256 MiB RAM  •  0.1 vCPU  (== 100 mCPU)
+    "resources": {
+      "memoryMb": 256,
+      "cpuCores": 0.1
+    }
+  },
+
+  // VOLUME  ──────────────────────────────────────────
+  // Same as `railway volume create data --size 1Gi --mount-path /data`
+  "volumes": [
+    {
+      "name": "data",          // any label
+      "mountPath": "/data",
+      "sizeGb": 1              // resize here if you ever need >1 GB
+    }
+  ]
 }
