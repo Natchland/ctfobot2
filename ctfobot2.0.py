@@ -100,20 +100,79 @@ class LabelRoleSelect(discord.ui.Select):
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, **kwargs)
 
     async def callback(self, interaction: discord.Interaction):
-        label_role_id = self.values[0]
-        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
-        if isinstance(self.view, AddCodeLabelView):
-            await interaction.response.edit_message(content="Now select roles that can view this code:", view=AddCodeView(label_role_id, all_roles))
-        elif isinstance(self.view, UpdateCodeLabelView):
-            current_code = codes[label_role_id]["value"]
-            await interaction.response.edit_message(content=f"Now select new viewers and code value (current: `{current_code}`):", view=UpdateCodeView(label_role_id, all_roles))
-        elif isinstance(self.view, RemoveCodeView):
-            role_name = interaction.guild.get_role(int(label_role_id)).name
-            await interaction.response.send_message(
-                f"Are you sure you want to remove the code for **{role_name}**?",
-                ephemeral=True,
-                view=ConfirmRemoveView(label_role_id, role_name)
+        pass  # handled in the parent view
+
+class AddCodeModal(discord.ui.Modal, title="Add Code"):
+    viewers = discord.ui.TextInput(
+        label="Viewer Roles (names, mentions, or IDs, comma separated)",
+        required=True,
+        placeholder="e.g. @Members, 123456789, Admin"
+    )
+    code_value = discord.ui.TextInput(label="Code Value", required=True)
+
+    def __init__(self, label_role_id):
+        super().__init__()
+        self.label_role_id = label_role_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        input_items = [v.strip() for v in self.viewers.value.split(",") if v.strip()]
+        viewer_roles = set()
+
+        for item in input_items:
+            role = None
+            # Mention: <@&1234567890>
+            if item.startswith("<@&") and item.endswith(">"):
+                try:
+                    role_id = int(item[3:-1])
+                    role = guild.get_role(role_id)
+                except ValueError:
+                    pass
+            elif item.isdigit():
+                role = guild.get_role(int(item))
+            else:
+                role = discord.utils.get(guild.roles, name=item)
+                if not role:
+                    # Try case-insensitive match
+                    role = next((r for r in guild.roles if r.name.lower() == item.lower()), None)
+            if role and not role.is_bot_managed() and role.name != "@everyone":
+                viewer_roles.add(str(role.id))
+
+        if not viewer_roles:
+            return await interaction.response.send_message(
+                "No valid roles found. Please enter valid role names, mentions, or IDs.",
+                ephemeral=True
             )
+        if self.label_role_id in codes:
+            return await interaction.response.send_message(
+                "Code already exists for that label. Use update.",
+                ephemeral=True
+            )
+        codes[self.label_role_id] = {
+            "value": self.code_value.value,
+            "viewers": list(viewer_roles)
+        }
+        save_codes(codes)
+        role_names = ", ".join(
+            f"**{guild.get_role(int(r)).name}**" for r in viewer_roles if guild.get_role(int(r))
+        )
+        await interaction.response.send_message(
+            f"Code for **{guild.get_role(int(self.label_role_id)).name}** added. Viewable by: {role_names}",
+            ephemeral=True
+        )
+
+class AddCodeLabelView(discord.ui.View):
+    def __init__(self, roles):
+        super().__init__(timeout=60)
+        self.add_item(LabelRoleSelect(roles, "Select label role"))
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.green)
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        select: LabelRoleSelect = next(i for i in self.children if isinstance(i, LabelRoleSelect))
+        if not select.values:
+            return await interaction.response.send_message("Please select a label role.", ephemeral=True)
+        label_role_id = select.values[0]
+        await interaction.response.send_modal(AddCodeModal(label_role_id))
 
 class CodesMenuView(discord.ui.View):
     def __init__(self, author: discord.Member):
@@ -151,40 +210,7 @@ class AddCodeButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
-        await interaction.response.send_message("Select the label role for the code:", view=AddCodeLabelView(all_roles), ephemeral=True)
-
-class AddCodeLabelView(discord.ui.View):
-    def __init__(self, roles):
-        super().__init__(timeout=60)
-        self.add_item(LabelRoleSelect(roles, "Select label role"))
-
-class AddCodeView(discord.ui.View):
-    def __init__(self, label_role_id, roles):
-        super().__init__(timeout=60)
-        self.label_role_id = label_role_id
-        self.selected_viewers = []
-        self.add_item(RoleMultiSelect(roles, "Select roles who can view", min_values=1, max_values=10))
-        self.code_value = discord.ui.TextInput(label="Code Value", style=discord.TextStyle.short)
-        self.add_item(self.code_value)
-
-    @discord.ui.button(label="Submit", style=discord.ButtonStyle.green)
-    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        label_role_id = self.label_role_id
-        viewers = self.selected_viewers
-        code_value = self.code_value.value
-        if not viewers or not code_value:
-            return await interaction.response.send_message("Please select viewers and enter a code value.", ephemeral=True)
-        if label_role_id in codes:
-            return await interaction.response.send_message("Code already exists for that label. Use update.", ephemeral=True)
-        codes[label_role_id] = {"value": code_value, "viewers": list(viewers)}
-        save_codes(codes)
-        role_names = ", ".join(
-            f"**{interaction.guild.get_role(int(r)).name}**" for r in viewers if interaction.guild.get_role(int(r))
-        )
-        await interaction.response.send_message(
-            f"Code for **{interaction.guild.get_role(int(label_role_id)).name}** added. Viewable by: {role_names}", ephemeral=True
-        )
-        await interaction.delete_original_response()
+        await interaction.response.send_message("Select the label role for the code and click Continue:", view=AddCodeLabelView(all_roles), ephemeral=True)
 
 class UpdateCodeButton(discord.ui.Button):
     def __init__(self):
@@ -347,8 +373,6 @@ async def _periodic_autosave() -> None:
     while not bot.is_closed():
         await asyncio.sleep(60)
         _dump_all()
-
-# ========== ACTIVITY LOGIC ==========
 
 def mark_active(member: discord.Member) -> None:
     if member.bot:
