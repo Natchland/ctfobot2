@@ -85,9 +85,9 @@ def has_code_manager_perms(member: discord.Member):
 # === UI CLASSES FOR /codes ===
 
 class RoleMultiSelect(discord.ui.Select):
-    def __init__(self, roles, placeholder, min_values=1, max_values=5):
+    def __init__(self, roles, placeholder, min_values=1, max_values=5, **kwargs):
         options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
-        super().__init__(placeholder=placeholder, min_values=min_values, max_values=max_values, options=options)
+        super().__init__(placeholder=placeholder, min_values=min_values, max_values=max_values, options=options, **kwargs)
 
     async def callback(self, interaction: discord.Interaction):
         if hasattr(self.view, "selected_viewers"):
@@ -95,15 +95,13 @@ class RoleMultiSelect(discord.ui.Select):
         await interaction.response.defer()
 
 class LabelRoleSelect(discord.ui.Select):
-    def __init__(self, roles, placeholder):
+    def __init__(self, roles, placeholder, **kwargs):
         options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
-        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, **kwargs)
 
     async def callback(self, interaction: discord.Interaction):
         label_role_id = self.values[0]
         all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
-        # Which view is this for?
-        # AddCodeLabelView or UpdateCodeLabelView or RemoveCodeView
         if isinstance(self.view, AddCodeLabelView):
             await interaction.response.edit_message(content="Now select roles that can view this code:", view=AddCodeView(label_role_id, all_roles))
         elif isinstance(self.view, UpdateCodeLabelView):
