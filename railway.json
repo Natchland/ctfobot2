@@ -2,9 +2,9 @@
   "build": {
     "builder": "NIXPACKS"
   },
-  
+
   "deploy": {
-    "startCommand": "python bot.py",
+    "startCommand": "python ctfobot2.0.py",
 
     "healthcheckPath": null,
 
