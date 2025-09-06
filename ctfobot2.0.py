@@ -1,14 +1,12 @@
-# bot.py – feedback + registration + reviewer + giveaways + activity tracker
-# -------------------------------------------------------------------------
+# bot.py – feedback + registration + reviewer + giveaways + activity tracker + CODE SYSTEM
 from __future__ import annotations
 
-import os, sys, json, asyncio, signal, discord     # ← added sys, signal
+import os, sys, json, asyncio, signal, discord
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Set, Any
 from random import choice
-
 
 # ══════════════════════════════════════════════════════════════════
 #  Configuration (IDs can stay hard-coded; secrets via env vars)
@@ -35,8 +33,8 @@ FOCUS_ROLE_IDS = {
     "PvP":          1408687710159245362,
 }
 
-TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60          # 7-day temp-ban
-GIVEAWAY_ROLE_ID     = 1403337937722019931       # “Active Member”
+TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60
+GIVEAWAY_ROLE_ID     = 1403337937722019931
 GIVEAWAY_CH_ID       = 1413929735658016899
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG       = "END:"
@@ -46,12 +44,34 @@ PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
-# ─── persistent storage path (Railway volume) ─────────────────────
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
+CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
+
+# ══════════════════════════════════════════════════════════════════
+#  CODE SYSTEM: Role-based Codes Storage & Commands
+# ══════════════════════════════════════════════════════════════════
+
+def load_codes() -> dict:
+    if os.path.isfile(CODES_FILE):
+        try:
+            with open(CODES_FILE, "r", encoding="utf8") as fp:
+                return json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
+
+def save_codes(codes: dict):
+    try:
+        with open(CODES_FILE, "w", encoding="utf8") as fp:
+            json.dump(codes, fp)
+    except OSError:
+        pass
+
+codes: dict = load_codes()
 
 # ══════════════════════════════════════════════════════════════════
 #  Bot / intents
@@ -76,7 +96,6 @@ def load_reviewers() -> None:
         except (OSError, json.JSONDecodeError):
             pass
 
-
 def save_reviewers() -> None:
     try:
         with open(REVIEW_FILE, "w", encoding="utf8") as fp:
@@ -84,14 +103,12 @@ def save_reviewers() -> None:
     except OSError:
         pass
 
-
 load_reviewers()
 
 # ══════════════════════════════════════════════════════════════════
 #  ACTIVITY TRACKER (load/save)
 # ══════════════════════════════════════════════════════════════════
 activity: Dict[str, Dict[str, Any]] = {}
-
 
 def load_activity() -> None:
     global activity
@@ -102,7 +119,6 @@ def load_activity() -> None:
         except (OSError, json.JSONDecodeError):
             activity = {}
 
-
 def save_activity() -> None:
     try:
         with open(ACTIVITY_FILE, "w", encoding="utf8") as fp:
@@ -110,17 +126,15 @@ def save_activity() -> None:
     except OSError:
         pass
 
-
 load_activity()
 
 # ══════════════════════════════════════════════════════════════════
 #  NEW — autosave & graceful-shutdown helpers
 # ══════════════════════════════════════════════════════════════════
 def _dump_all() -> None:
-    """Flush every in-memory structure to disk."""
     save_reviewers()
     save_activity()
-
+    save_codes(codes)
 
 def _graceful_exit() -> None:
     print("Signal received – saving JSON files and shutting down …")
@@ -129,11 +143,10 @@ def _graceful_exit() -> None:
     finally:
         sys.exit(0)
 
-
 async def _periodic_autosave() -> None:
     await bot.wait_until_ready()
     while not bot.is_closed():
-        await asyncio.sleep(60)          # every minute
+        await asyncio.sleep(60)
         _dump_all()
 
 # =========================================================================
@@ -163,10 +176,8 @@ def mark_active(member: discord.Member) -> None:
             member.add_roles(role, reason=f"{PROMOTE_STREAK}-day activity streak")
         )
 
-
 def _cutoff(days: int) -> float:
     return datetime.now(timezone.utc).timestamp() - days * 86400
-
 
 def members_to_warn(guild: discord.Guild):
     warn_cut = _cutoff(WARN_BEFORE_DAYS)
@@ -185,7 +196,6 @@ def members_to_warn(guild: discord.Guild):
             out.append(m)
     return out
 
-
 def members_to_demote(guild: discord.Guild):
     kick_cut = _cutoff(INACTIVE_AFTER_DAYS)
     role = guild.get_role(GIVEAWAY_ROLE_ID)
@@ -196,7 +206,6 @@ def members_to_demote(guild: discord.Guild):
         for m in role.members
         if float(activity.get(str(m.id), {}).get("last", 0)) < kick_cut
     ]
-
 
 async def daily_activity_check():
     await bot.wait_until_ready()
@@ -240,12 +249,10 @@ async def daily_activity_check():
 
         save_activity()
 
-
 @bot.event
 async def on_message(msg: discord.Message):
     if msg.guild and not msg.author.bot:
         mark_active(msg.author)
-
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -266,7 +273,6 @@ def fmt_time(s: int) -> str:
     m, s = divmod(s, 60)
     return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m {s}s" if m else f"{s}s"
 
-
 def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False):
     if idx < len(e.fields):
         e.set_field_at(idx, name=name, value=value, inline=inline)
@@ -275,11 +281,9 @@ def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False
             e.add_field(name="\u200b", value="\u200b", inline=False)
         e.add_field(name=name, value=value, inline=inline)
 
-
 def eligible(g: discord.Guild):
     r = g.get_role(GIVEAWAY_ROLE_ID)
     return [m for m in r.members if not m.bot] if r else []
-
 
 class GiveawayControl(discord.ui.View):
     def __init__(self, g, ch_id, msg_id, prize, stop):
@@ -347,7 +351,6 @@ class GiveawayControl(discord.ui.View):
         await chan.send("Giveaway cancelled.")
         await inter.response.send_message("Cancelled.", ephemeral=True)
 
-
 async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
     chan = g.get_channel(ch_id)
     msg = await chan.fetch_message(msg_id)
@@ -383,7 +386,6 @@ async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
     else:
         await chan.send("No eligible entrants.")
 
-
 async def resume_giveaways():
     g = bot.get_guild(GUILD_ID)
     ch = g.get_channel(GIVEAWAY_CH_ID) if g else None
@@ -408,7 +410,6 @@ async def resume_giveaways():
         v = GiveawayControl(g, ch.id, msg.id, prize, stop)
         bot.add_view(v, message_id=msg.id)
         asyncio.create_task(run_giveaway(g, ch.id, msg.id, prize, end_ts, stop))
-
 
 @bot.tree.command(name="giveaway", description="Start a giveaway")
 @app_commands.check(lambda i: i.user.guild_permissions.administrator)
@@ -501,7 +502,6 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
 def is_admin(i: discord.Interaction) -> bool:
     return i.user.guild_permissions.administrator or i.user.id == bot.owner_id
 
-
 @bot.tree.command(name="addreviewer")
 @app_commands.check(is_admin)
 async def add_reviewer(i: discord.Interaction, member: discord.Member):
@@ -509,14 +509,12 @@ async def add_reviewer(i: discord.Interaction, member: discord.Member):
     save_reviewers()
     await i.response.send_message("Added.", ephemeral=True)
 
-
 @bot.tree.command(name="removereviewer")
 @app_commands.check(is_admin)
 async def remove_reviewer(i: discord.Interaction, member: discord.Member):
     bot.review_team.discard(member.id)
     save_reviewers()
     await i.response.send_message("Removed.", ephemeral=True)
-
 
 @bot.tree.command(name="reviewers")
 @app_commands.check(is_admin)
@@ -529,7 +527,6 @@ async def list_reviewers(i: discord.Interaction):
 # =========================================================================
 def opts(*lbl: str):
     return [discord.SelectOption(label=l, value=l) for l in lbl]
-
 
 class MemberRegistrationView(discord.ui.View):
     def __init__(self):
@@ -556,7 +553,6 @@ class MemberRegistrationView(discord.ui.View):
         )
         self.start_msg = await inter.original_response()
 
-
 class SubmitView(discord.ui.View):
     def __init__(self, v):
         super().__init__(timeout=300)
@@ -565,7 +561,6 @@ class SubmitView(discord.ui.View):
     @discord.ui.button(label="Submit", style=discord.ButtonStyle.success)
     async def submit(self, inter: discord.Interaction, _):
         await inter.response.send_modal(FinalRegistrationModal(self.v))
-
 
 class _BaseSelect(discord.ui.Select):
     def __init__(self, v, key, **kw):
@@ -587,7 +582,6 @@ class _BaseSelect(discord.ui.Select):
                 wait=True,
             )
 
-
 class SelectAge(_BaseSelect):
     def __init__(self, v):
         super().__init__(
@@ -596,7 +590,6 @@ class SelectAge(_BaseSelect):
             placeholder="Age",
             options=opts("12-14", "15-17", "18-21", "21+"),
         )
-
 
 class SelectRegion(_BaseSelect):
     def __init__(self, v):
@@ -607,7 +600,6 @@ class SelectRegion(_BaseSelect):
             options=opts("North America", "Europe", "Asia", "Other"),
         )
 
-
 class SelectBans(_BaseSelect):
     def __init__(self, v):
         super().__init__(
@@ -616,7 +608,6 @@ class SelectBans(_BaseSelect):
             placeholder="Any bans?",
             options=opts("Yes", "No"),
         )
-
 
 class SelectFocus(_BaseSelect):
     def __init__(self, v):
@@ -633,7 +624,6 @@ class SelectFocus(_BaseSelect):
             ),
         )
 
-
 class SelectSkill(_BaseSelect):
     def __init__(self, v):
         super().__init__(
@@ -642,7 +632,6 @@ class SelectSkill(_BaseSelect):
             placeholder="Skill level",
             options=opts("Beginner", "Intermediate", "Advanced", "Expert"),
         )
-
 
 class ActionView(discord.ui.View):
     def __init__(self, guild, uid, region, focus):
@@ -714,13 +703,11 @@ class ActionView(discord.ui.View):
 
         asyncio.create_task(unban_later())
 
-
 async def safe_fetch(guild, uid):
     try:
         return await guild.fetch_member(uid)
     except (discord.NotFound, discord.HTTPException):
         return None
-
 
 class FinalRegistrationModal(discord.ui.Modal):
     ban_expl: discord.ui.TextInput | None
@@ -838,12 +825,103 @@ class FinalRegistrationModal(discord.ui.Modal):
 
         asyncio.create_task(tidy())
 
-
 @bot.tree.command(name="memberform", description="Start member registration")
 async def memberform(inter: discord.Interaction):
     await inter.response.send_message(
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
+
+# ══════════════════════════════════════════════════════════════════
+#  CODE SYSTEM: Slash Command Group (multi-role view support!)
+# ══════════════════════════════════════════════════════════════════
+
+class CodeCommands(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="code", description="Access or manage role codes")
+
+    @app_commands.command(name="show", description="Show all codes for your roles")
+    async def show(self, inter: discord.Interaction):
+        if not inter.guild:
+            return await inter.response.send_message("Must be used in a server.", ephemeral=True)
+        user_roles = {str(r.id) for r in inter.user.roles} if hasattr(inter.user, "roles") else set()
+        found = []
+        for code_label_role_id, data in codes.items():
+            viewers = set(data.get("viewers", []))
+            if user_roles & viewers:
+                role = inter.guild.get_role(int(code_label_role_id))
+                code_val = data["value"]
+                found.append(f"**{role.name if role else code_label_role_id}**: `{code_val}`")
+        if found:
+            msg = "Your codes:\n" + "\n".join(found)
+        else:
+            msg = "You don't have any codes assigned to your roles."
+        await inter.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="add", description="Add a code for one or more roles (admin only)")
+    @app_commands.describe(
+        code_label_role="The role that labels this code (for admin reference)",
+        can_view="Roles that are allowed to see this code",
+        value="The code value"
+    )
+    async def add(self, inter: discord.Interaction, code_label_role: discord.Role, can_view: list[discord.Role], value: str):
+        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
+            return await inter.response.send_message("You don't have permission.", ephemeral=True)
+        rid = str(code_label_role.id)
+        if rid in codes:
+            return await inter.response.send_message(
+                f"A code already exists for **{code_label_role.name}**. Use `/code update`.", ephemeral=True
+            )
+        if not can_view:
+            return await inter.response.send_message("You must select at least one role for 'can_view'.", ephemeral=True)
+        codes[rid] = {
+            "value": value,
+            "viewers": [str(role.id) for role in can_view]
+        }
+        save_codes(codes)
+        allowed_names = ", ".join(f"**{role.name}**" for role in can_view)
+        await inter.response.send_message(
+            f"Code for **{code_label_role.name}** added. Viewable by: {allowed_names}", ephemeral=True
+        )
+
+    @app_commands.command(name="update", description="Update code value and which roles can view it (admin only)")
+    @app_commands.describe(
+        code_label_role="The code label (role) to update",
+        can_view="Roles that are allowed to see this code",
+        value="The new code value"
+    )
+    async def update(self, inter: discord.Interaction, code_label_role: discord.Role, can_view: list[discord.Role], value: str):
+        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
+            return await inter.response.send_message("You don't have permission.", ephemeral=True)
+        rid = str(code_label_role.id)
+        if rid not in codes:
+            return await inter.response.send_message(
+                f"No code exists for **{code_label_role.name}** yet. Use `/code add` first.", ephemeral=True
+            )
+        if not can_view:
+            return await inter.response.send_message("You must select at least one role for 'can_view'.", ephemeral=True)
+        codes[rid]["value"] = value
+        codes[rid]["viewers"] = [str(role.id) for role in can_view]
+        save_codes(codes)
+        allowed_names = ", ".join(f"**{role.name}**" for role in can_view)
+        await inter.response.send_message(
+            f"Code for **{code_label_role.name}** updated. Now viewable by: {allowed_names}", ephemeral=True
+        )
+
+    @app_commands.command(name="remove", description="Remove code for a role (admin only)")
+    @app_commands.describe(code_label_role="The code label (role) to remove")
+    async def remove(self, inter: discord.Interaction, code_label_role: discord.Role):
+        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
+            return await inter.response.send_message("You don't have permission.", ephemeral=True)
+        rid = str(code_label_role.id)
+        if rid not in codes:
+            return await inter.response.send_message(
+                f"No code exists for **{code_label_role.name}**.", ephemeral=True
+            )
+        del codes[rid]
+        save_codes(codes)
+        await inter.response.send_message(f"Code for **{code_label_role.name}** has been removed.", ephemeral=True)
+
+bot.tree.add_command(CodeCommands())
 
 # ══════════════════════════════════════════════════════════════════
 #  READY — create autosave task & register signal handlers
