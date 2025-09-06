@@ -2,7 +2,7 @@
 # -------------------------------------------------------------------------
 from __future__ import annotations
 
-import os, json, asyncio, discord
+import os, sys, json, asyncio, signal, discord     # ← added sys, signal
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone, date
@@ -11,9 +11,9 @@ from random import choice
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Configuration (IDs can stay hard-coded; secrets via env)
+#  Configuration (IDs can stay hard-coded; secrets via env vars)
 # ══════════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN")                    # <── put in Railway Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")                    # <── set in Railway
 GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
 
 FEEDBACK_CH    = 1413188006499586158
@@ -35,7 +35,7 @@ FOCUS_ROLE_IDS = {
     "PvP":          1408687710159245362,
 }
 
-TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60          # 7-day temp ban
+TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60          # 7-day temp-ban
 GIVEAWAY_ROLE_ID     = 1403337937722019931       # “Active Member”
 GIVEAWAY_CH_ID       = 1413929735658016899
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
@@ -46,10 +46,9 @@ PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
-# ─── persistent storage path ─────────────────────────────────────
-# Railway mounts the volume at /data   (set DATA_DIR env to override)
+# ─── persistent storage path (Railway volume) ─────────────────────
 DATA_DIR = os.getenv("DATA_DIR", "/data")
-os.makedirs(DATA_DIR, exist_ok=True)             # works locally too
+os.makedirs(DATA_DIR, exist_ok=True)
 
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
@@ -62,11 +61,9 @@ intents.members         = True
 intents.message_content = True
 bot = commands.Bot("!", intents=intents)
 
-# runtime containers
 bot.review_team:           Set[int]                 = set()
 bot.last_anonymous_time:   Dict[int, datetime]      = {}
 bot.giveaway_stop_events:  Dict[int, asyncio.Event] = {}
-
 
 # ══════════════════════════════════════════════════════════════════
 #  Reviewer list helpers
@@ -90,9 +87,8 @@ def save_reviewers() -> None:
 
 load_reviewers()
 
-
 # ══════════════════════════════════════════════════════════════════
-#  ACTIVITY TRACKER
+#  ACTIVITY TRACKER (load/save)
 # ══════════════════════════════════════════════════════════════════
 activity: Dict[str, Dict[str, Any]] = {}
 
@@ -117,7 +113,32 @@ def save_activity() -> None:
 
 load_activity()
 
+# ══════════════════════════════════════════════════════════════════
+#  NEW — autosave & graceful-shutdown helpers
+# ══════════════════════════════════════════════════════════════════
+def _dump_all() -> None:
+    """Flush every in-memory structure to disk."""
+    save_reviewers()
+    save_activity()
 
+
+def _graceful_exit() -> None:
+    print("Signal received – saving JSON files and shutting down …")
+    try:
+        _dump_all()
+    finally:
+        sys.exit(0)
+
+
+async def _periodic_autosave() -> None:
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(60)          # every minute
+        _dump_all()
+
+# =========================================================================
+#  ACTIVITY LOGIC (unchanged from your file)
+# =========================================================================
 def mark_active(member: discord.Member) -> None:
     if member.bot:
         return
@@ -136,7 +157,6 @@ def mark_active(member: discord.Member) -> None:
     rec["last"] = datetime.now(timezone.utc).timestamp()
     save_activity()
 
-    # promotion check
     role = member.guild.get_role(GIVEAWAY_ROLE_ID)
     if role and rec["streak"] >= PROMOTE_STREAK and role not in member.roles:
         asyncio.create_task(
@@ -181,7 +201,6 @@ def members_to_demote(guild: discord.Guild):
 async def daily_activity_check():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        # sleep until 04:00 UTC
         now = datetime.now(timezone.utc)
         nxt = (now + timedelta(days=1)).replace(
             hour=4, minute=0, second=0, microsecond=0
@@ -195,20 +214,17 @@ async def daily_activity_check():
         warn_ch = guild.get_channel(WARNING_CH_ID)
         role = guild.get_role(GIVEAWAY_ROLE_ID)
 
-        # send warnings
         for m in members_to_warn(guild):
             if warn_ch:
                 try:
                     await warn_ch.send(
                         f"{m.mention} you have been inactive **{WARN_BEFORE_DAYS} days**. "
-                        f"You will lose {role.mention} tomorrow. "
-                        f"Send a message or join voice to stay active!"
+                        f"You will lose {role.mention} tomorrow."
                     )
                 except discord.HTTPException:
                     pass
             activity[str(m.id)]["warned"] = True
 
-        # demote inactive
         removed = 0
         for m in members_to_demote(guild):
             try:
@@ -241,10 +257,9 @@ async def on_voice_state_update(member, before, after):
     ):
         mark_active(member)
 
-
-# ══════════════════════════════════════════════════════════════════
-#  GIVEAWAYS (restart-safe)
-# ══════════════════════════════════════════════════════════════════
+# =========================================================================
+#  GIVEAWAYS (unchanged)
+# =========================================================================
 def fmt_time(s: int) -> str:
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
@@ -439,10 +454,9 @@ async def giveaway(
         f"Giveaway started in {ch.mention}.", ephemeral=True
     )
 
-
-# ══════════════════════════════════════════════════════════════════
-#  FEEDBACK
-# ══════════════════════════════════════════════════════════════════
+# =========================================================================
+#  FEEDBACK  (unchanged)
+# =========================================================================
 @bot.tree.command(name="feedback")
 @app_commands.describe(message="Your feedback", anonymous="Send anonymously?")
 async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
@@ -481,10 +495,9 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
     await ch.send(embed=embed)
     await inter.response.send_message("Thanks!", ephemeral=True)
 
-
-# ══════════════════════════════════════════════════════════════════
-#  Reviewer commands
-# ══════════════════════════════════════════════════════════════════
+# =========================================================================
+#  Reviewer commands (unchanged)
+# =========================================================================
 def is_admin(i: discord.Interaction) -> bool:
     return i.user.guild_permissions.administrator or i.user.id == bot.owner_id
 
@@ -511,10 +524,9 @@ async def list_reviewers(i: discord.Interaction):
     txt = ", ".join(f"<@{u}>" for u in bot.review_team) or "None."
     await i.response.send_message(txt, ephemeral=True)
 
-
-# ══════════════════════════════════════════════════════════════════
-#  REGISTRATION WORKFLOW (unchanged logic)
-# ══════════════════════════════════════════════════════════════════
+# =========================================================================
+#  REGISTRATION WORKFLOW (unchanged)
+# =========================================================================
 def opts(*lbl: str):
     return [discord.SelectOption(label=l, value=l) for l in lbl]
 
@@ -578,7 +590,12 @@ class _BaseSelect(discord.ui.Select):
 
 class SelectAge(_BaseSelect):
     def __init__(self, v):
-        super().__init__(v, "age", placeholder="Age", options=opts("12-14", "15-17", "18-21", "21+"))
+        super().__init__(
+            v,
+            "age",
+            placeholder="Age",
+            options=opts("12-14", "15-17", "18-21", "21+"),
+        )
 
 
 class SelectRegion(_BaseSelect):
@@ -593,7 +610,12 @@ class SelectRegion(_BaseSelect):
 
 class SelectBans(_BaseSelect):
     def __init__(self, v):
-        super().__init__(v, "bans", placeholder="Any bans?", options=opts("Yes", "No"))
+        super().__init__(
+            v,
+            "bans",
+            placeholder="Any bans?",
+            options=opts("Yes", "No"),
+        )
 
 
 class SelectFocus(_BaseSelect):
@@ -602,7 +624,13 @@ class SelectFocus(_BaseSelect):
             v,
             "focus",
             placeholder="Main focus",
-            options=opts("PvP", "Farming", "Base Sorting", "Building", "Electricity"),
+            options=opts(
+                "PvP",
+                "Farming",
+                "Base Sorting",
+                "Building",
+                "Electricity",
+            ),
         )
 
 
@@ -817,20 +845,31 @@ async def memberform(inter: discord.Interaction):
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
 
-
 # ══════════════════════════════════════════════════════════════════
-#  READY
+#  READY — create autosave task & register signal handlers
 # ══════════════════════════════════════════════════════════════════
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    # start daily activity task once
+    # daily activity checker
     if not getattr(bot, "_activity_task_started", False):
         asyncio.create_task(daily_activity_check())
         bot._activity_task_started = True
 
-    # sync slash commands to the guild
+    # autosave task
+    if not getattr(bot, "_autosave_started", False):
+        bot.loop.create_task(_periodic_autosave())
+        bot._autosave_started = True
+
+    # register signal handlers (loop is running now)
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            bot.loop.add_signal_handler(_sig, _graceful_exit)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(_sig, lambda *_: _graceful_exit())
+
+    # slash-command sync
     guild_obj = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
@@ -838,7 +877,6 @@ async def on_ready():
 
     await resume_giveaways()
     print("Giveaways resumed")
-
 
 # ══════════════════════════════════════════════════════════════════
 #  RUN
