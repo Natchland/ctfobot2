@@ -1,0 +1,13 @@
+# byte-code / editor files
+__pycache__/
+*.py[cod]
+*.swp
+.vscode/
+
+# local data the bot writes (we’ll store it on a Railway volume in prod)
+activity.json
+reviewers.json
+/data/
+
+# secrets
+.env
