@@ -6,9 +6,7 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Set, Any
 from random import choice
 
-# ════════════════════════════════════════════
-#  Configuration (IDs can stay hard-coded)
-# ════════════════════════════════════════════
+# ══ Configuration ═══════════════════════════
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
 FEEDBACK_CH    = 1413188006499586158
@@ -45,9 +43,7 @@ REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
 CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
 
-# ════════════════════════════════════════════
-#  Bot / intents
-# ════════════════════════════════════════════
+# ══ Bot/intents ═════════════════════════════
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -57,9 +53,7 @@ bot.review_team = set()
 bot.last_anonymous_time = {}
 bot.giveaway_stop_events = {}
 
-# ════════════════════════════════════════════
-#  CODE SYSTEM: Role-based Codes Storage & UI
-# ════════════════════════════════════════════
+# ══ CODE SYSTEM: Role-based Codes Storage & UI ══
 
 def load_codes() -> dict:
     if os.path.isfile(CODES_FILE):
@@ -96,10 +90,12 @@ class RoleMultiSelect(discord.ui.Select):
 
 class LabelRoleSelect(discord.ui.Select):
     def __init__(self, roles, placeholder, **kwargs):
+        print(f"LabelRoleSelect __init__ called! roles={roles}, placeholder={placeholder}, kwargs={kwargs}")
         options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, **kwargs)
 
     async def callback(self, interaction: discord.Interaction):
+        print("LabelRoleSelect callback called.")
         pass  # handled in the parent view
 
 class AddCodeModal(discord.ui.Modal, title="Add Code"):
@@ -121,7 +117,6 @@ class AddCodeModal(discord.ui.Modal, title="Add Code"):
 
         for item in input_items:
             role = None
-            # Mention: <@&1234567890>
             if item.startswith("<@&") and item.endswith(">"):
                 try:
                     role_id = int(item[3:-1])
@@ -133,7 +128,6 @@ class AddCodeModal(discord.ui.Modal, title="Add Code"):
             else:
                 role = discord.utils.get(guild.roles, name=item)
                 if not role:
-                    # Try case-insensitive match
                     role = next((r for r in guild.roles if r.name.lower() == item.lower()), None)
             if role and not role.is_bot_managed() and role.name != "@everyone":
                 viewer_roles.add(str(role.id))
@@ -163,6 +157,7 @@ class AddCodeModal(discord.ui.Modal, title="Add Code"):
 
 class AddCodeLabelView(discord.ui.View):
     def __init__(self, roles):
+        print("AddCodeLabelView __init__ called with roles:", roles)
         super().__init__(timeout=60)
         self.add_item(LabelRoleSelect(roles, "Select label role"))
 
@@ -210,6 +205,7 @@ class AddCodeButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        print("AddCodeButton callback called - all_roles:", all_roles)
         await interaction.response.send_message("Select the label role for the code and click Continue:", view=AddCodeLabelView(all_roles), ephemeral=True)
 
 class UpdateCodeButton(discord.ui.Button):
@@ -313,9 +309,7 @@ async def codes_command(inter: discord.Interaction):
         ephemeral=True
     )
 
-# ════════════════════════════════════════════
-#  Reviewer List helpers
-# ════════════════════════════════════════════
+# ══ Reviewer List helpers ═══════════════════
 def load_reviewers() -> None:
     if os.path.isfile(REVIEW_FILE):
         try:
@@ -333,9 +327,7 @@ def save_reviewers() -> None:
 
 load_reviewers()
 
-# ════════════════════════════════════════════
-#  ACTIVITY TRACKER (load/save)
-# ════════════════════════════════════════════
+# ══ ACTIVITY TRACKER (load/save) ════════════
 activity: Dict[str, Dict[str, Any]] = {}
 
 def load_activity() -> None:
@@ -1049,10 +1041,7 @@ async def memberform(inter: discord.Interaction):
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
 
-# ════════════════════════════════════════════
-#  READY HANDLER, AUTOSAVE, ETC (unchanged)
-# ════════════════════════════════════════════
-
+# ══ READY HANDLER, AUTOSAVE ETC ═════════════
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
@@ -1083,9 +1072,6 @@ async def on_ready():
     await resume_giveaways()
     print("Giveaways resumed")
 
-# ════════════════════════════════════════════
-#  RUN
-# ════════════════════════════════════════════
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN environment variable!")
 
