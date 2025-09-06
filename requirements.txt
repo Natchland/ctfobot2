@@ -1,0 +1,5 @@
+# discord & friends
+discord.py>=2.3.2,<3.0
+
+# optional; remove the ones you don’t use
+python-dotenv>=1.0
