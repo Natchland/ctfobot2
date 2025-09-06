@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os, sys, json, asyncio, signal, discord
 from discord import app_commands
 from discord.ext import commands
@@ -7,12 +6,11 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Set, Any
 from random import choice
 
-# ══════════════════════════════════════════════════════════════════
-#  Configuration (IDs can stay hard-coded; secrets via env vars)
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
+#  Configuration (IDs can stay hard-coded)
+# ════════════════════════════════════════════
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
-
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1413672763108888636
 WARNING_CH_ID  = 1398657081338237028
@@ -31,28 +29,25 @@ FOCUS_ROLE_IDS = {
     "Electricity":  1380233234675400875,
     "PvP":          1408687710159245362,
 }
-
 TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60
 GIVEAWAY_ROLE_ID     = 1403337937722019931
 GIVEAWAY_CH_ID       = 1413929735658016899
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG       = "END:"
 FOOTER_PRIZE_TAG     = "PRIZE:"
-
 PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
-
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
 CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  Bot / intents
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -62,9 +57,9 @@ bot.review_team = set()
 bot.last_anonymous_time = {}
 bot.giveaway_stop_events = {}
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  CODE SYSTEM: Role-based Codes Storage & UI
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 
 def load_codes() -> dict:
     if os.path.isfile(CODES_FILE):
@@ -87,23 +82,45 @@ codes: dict = load_codes()
 def has_code_manager_perms(member: discord.Member):
     return member.guild_permissions.administrator
 
-# ══ UI CLASSES FOR /codes ═════════════════════════════════════════
+# === UI CLASSES FOR /codes ===
 
 class RoleMultiSelect(discord.ui.Select):
     def __init__(self, roles, placeholder, min_values=1, max_values=5):
         options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
         super().__init__(placeholder=placeholder, min_values=min_values, max_values=max_values, options=options)
 
+    async def callback(self, interaction: discord.Interaction):
+        if hasattr(self.view, "selected_viewers"):
+            self.view.selected_viewers = self.values
+        await interaction.response.defer()
+
 class LabelRoleSelect(discord.ui.Select):
     def __init__(self, roles, placeholder):
         options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
 
+    async def callback(self, interaction: discord.Interaction):
+        label_role_id = self.values[0]
+        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        # Which view is this for?
+        # AddCodeLabelView or UpdateCodeLabelView or RemoveCodeView
+        if isinstance(self.view, AddCodeLabelView):
+            await interaction.response.edit_message(content="Now select roles that can view this code:", view=AddCodeView(label_role_id, all_roles))
+        elif isinstance(self.view, UpdateCodeLabelView):
+            current_code = codes[label_role_id]["value"]
+            await interaction.response.edit_message(content=f"Now select new viewers and code value (current: `{current_code}`):", view=UpdateCodeView(label_role_id, all_roles))
+        elif isinstance(self.view, RemoveCodeView):
+            role_name = interaction.guild.get_role(int(label_role_id)).name
+            await interaction.response.send_message(
+                f"Are you sure you want to remove the code for **{role_name}**?",
+                ephemeral=True,
+                view=ConfirmRemoveView(label_role_id, role_name)
+            )
+
 class CodesMenuView(discord.ui.View):
     def __init__(self, author: discord.Member):
         super().__init__(timeout=300)
         self.author = author
-
         self.add_item(ViewCodesButton())
         if has_code_manager_perms(author):
             self.add_item(AddCodeButton())
@@ -143,12 +160,6 @@ class AddCodeLabelView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(LabelRoleSelect(roles, "Select label role"))
 
-    @discord.ui.select(cls=LabelRoleSelect)
-    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
-        label_role_id = select.values[0]
-        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
-        await interaction.response.edit_message(content="Now select roles that can view this code:", view=AddCodeView(label_role_id, all_roles))
-
 class AddCodeView(discord.ui.View):
     def __init__(self, label_role_id, roles):
         super().__init__(timeout=60)
@@ -157,11 +168,6 @@ class AddCodeView(discord.ui.View):
         self.add_item(RoleMultiSelect(roles, "Select roles who can view", min_values=1, max_values=10))
         self.code_value = discord.ui.TextInput(label="Code Value", style=discord.TextStyle.short)
         self.add_item(self.code_value)
-
-    @discord.ui.select(cls=RoleMultiSelect)
-    async def select_viewers(self, interaction: discord.Interaction, select: RoleMultiSelect):
-        self.selected_viewers = select.values
-        await interaction.response.defer()
 
     @discord.ui.button(label="Submit", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -197,13 +203,6 @@ class UpdateCodeLabelView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(LabelRoleSelect(label_roles, "Select code to update"))
 
-    @discord.ui.select(cls=LabelRoleSelect)
-    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
-        label_role_id = select.values[0]
-        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
-        current_code = codes[label_role_id]["value"]
-        await interaction.response.edit_message(content=f"Now select new viewers and code value (current: `{current_code}`):", view=UpdateCodeView(label_role_id, all_roles))
-
 class UpdateCodeView(discord.ui.View):
     def __init__(self, label_role_id, roles):
         super().__init__(timeout=60)
@@ -212,11 +211,6 @@ class UpdateCodeView(discord.ui.View):
         self.add_item(RoleMultiSelect(roles, "Select new viewer roles", min_values=1, max_values=10))
         self.code_value = discord.ui.TextInput(label="New Code Value", style=discord.TextStyle.short)
         self.add_item(self.code_value)
-
-    @discord.ui.select(cls=RoleMultiSelect)
-    async def select_viewers(self, interaction: discord.Interaction, select: RoleMultiSelect):
-        self.selected_viewers = select.values
-        await interaction.response.defer()
 
     @discord.ui.button(label="Submit", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -271,18 +265,6 @@ class RemoveCodeView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(LabelRoleSelect(label_roles, "Select code to remove"))
 
-    @discord.ui.select(cls=LabelRoleSelect)
-    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
-        label_role_id = select.values[0]
-        if label_role_id not in codes:
-            return await interaction.response.send_message("No code exists for that label.", ephemeral=True)
-        role_name = interaction.guild.get_role(int(label_role_id)).name
-        await interaction.response.send_message(
-            f"Are you sure you want to remove the code for **{role_name}**?",
-            ephemeral=True,
-            view=ConfirmRemoveView(label_role_id, role_name)
-        )
-
 class ConfirmRemoveView(discord.ui.View):
     def __init__(self, label_role_id, role_name):
         super().__init__(timeout=30)
@@ -307,9 +289,9 @@ async def codes_command(inter: discord.Interaction):
         ephemeral=True
     )
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  Reviewer List helpers
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 def load_reviewers() -> None:
     if os.path.isfile(REVIEW_FILE):
         try:
@@ -327,9 +309,9 @@ def save_reviewers() -> None:
 
 load_reviewers()
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  ACTIVITY TRACKER (load/save)
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 activity: Dict[str, Dict[str, Any]] = {}
 
 def load_activity() -> None:
@@ -1045,9 +1027,9 @@ async def memberform(inter: discord.Interaction):
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  READY HANDLER, AUTOSAVE, ETC (unchanged)
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 
 @bot.event
 async def on_ready():
@@ -1079,9 +1061,9 @@ async def on_ready():
     await resume_giveaways()
     print("Giveaways resumed")
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 #  RUN
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN environment variable!")
 
