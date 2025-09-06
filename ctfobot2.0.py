@@ -1,4 +1,3 @@
-# bot.py – feedback + registration + reviewer + giveaways + activity tracker + CODE SYSTEM
 from __future__ import annotations
 
 import os, sys, json, asyncio, signal, discord
@@ -8,10 +7,15 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Set, Any
 from random import choice
 
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+bot = commands.Bot("!", intents=intents)
+
 # ══════════════════════════════════════════════════════════════════
 #  Configuration (IDs can stay hard-coded; secrets via env vars)
 # ══════════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN")                    # <── set in Railway
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
 
 FEEDBACK_CH    = 1413188006499586158
@@ -52,7 +56,7 @@ ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
 CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
 
 # ══════════════════════════════════════════════════════════════════
-#  CODE SYSTEM: Role-based Codes Storage & Commands
+#  CODE SYSTEM: Role-based Codes Storage & UI
 # ══════════════════════════════════════════════════════════════════
 
 def load_codes() -> dict:
@@ -73,21 +77,236 @@ def save_codes(codes: dict):
 
 codes: dict = load_codes()
 
-# ══════════════════════════════════════════════════════════════════
-#  Bot / intents
-# ══════════════════════════════════════════════════════════════════
-intents                 = discord.Intents.default()
-intents.members         = True
-intents.message_content = True
-bot = commands.Bot("!", intents=intents)
+def has_code_manager_perms(member: discord.Member):
+    return member.guild_permissions.administrator
 
-bot.review_team:           Set[int]                 = set()
-bot.last_anonymous_time:   Dict[int, datetime]      = {}
-bot.giveaway_stop_events:  Dict[int, asyncio.Event] = {}
+# ══ UI CLASSES FOR /codes ═════════════════════════════════════════
+
+class RoleMultiSelect(discord.ui.Select):
+    def __init__(self, roles, placeholder, min_values=1, max_values=5):
+        options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
+        super().__init__(placeholder=placeholder, min_values=min_values, max_values=max_values, options=options)
+
+class LabelRoleSelect(discord.ui.Select):
+    def __init__(self, roles, placeholder):
+        options = [discord.SelectOption(label=role.name, value=str(role.id)) for role in roles]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+
+class CodesMenuView(discord.ui.View):
+    def __init__(self, author: discord.Member):
+        super().__init__(timeout=300)
+        self.author = author
+
+        self.add_item(ViewCodesButton())
+        if has_code_manager_perms(author):
+            self.add_item(AddCodeButton())
+            self.add_item(UpdateCodeButton())
+            self.add_item(RemoveCodeButton())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("This menu is not for you.", ephemeral=True)
+            return False
+        return True
+
+class ViewCodesButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="View My Codes", style=discord.ButtonStyle.primary, custom_id="view_codes")
+
+    async def callback(self, interaction: discord.Interaction):
+        user_roles = {str(r.id) for r in interaction.user.roles}
+        found = []
+        for label_id, data in codes.items():
+            if user_roles & set(data.get("viewers", [])):
+                role = interaction.guild.get_role(int(label_id))
+                found.append(f"**{role.name if role else label_id}**: `{data['value']}`")
+        msg = "Your codes:\n" + "\n".join(found) if found else "You don't have any codes assigned to your roles."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+class AddCodeButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Add Code", style=discord.ButtonStyle.success, custom_id="add_code")
+
+    async def callback(self, interaction: discord.Interaction):
+        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        await interaction.response.send_message("Select the label role for the code:", view=AddCodeLabelView(all_roles), ephemeral=True)
+
+class AddCodeLabelView(discord.ui.View):
+    def __init__(self, roles):
+        super().__init__(timeout=60)
+        self.add_item(LabelRoleSelect(roles, "Select label role"))
+
+    @discord.ui.select(cls=LabelRoleSelect)
+    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
+        label_role_id = select.values[0]
+        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        await interaction.response.edit_message(content="Now select roles that can view this code:", view=AddCodeView(label_role_id, all_roles))
+
+class AddCodeView(discord.ui.View):
+    def __init__(self, label_role_id, roles):
+        super().__init__(timeout=60)
+        self.label_role_id = label_role_id
+        self.selected_viewers = []
+        self.add_item(RoleMultiSelect(roles, "Select roles who can view", min_values=1, max_values=10))
+        self.code_value = discord.ui.TextInput(label="Code Value", style=discord.TextStyle.short)
+        self.add_item(self.code_value)
+
+    @discord.ui.select(cls=RoleMultiSelect)
+    async def select_viewers(self, interaction: discord.Interaction, select: RoleMultiSelect):
+        self.selected_viewers = select.values
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Submit", style=discord.ButtonStyle.green)
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        label_role_id = self.label_role_id
+        viewers = self.selected_viewers
+        code_value = self.code_value.value
+        if not viewers or not code_value:
+            return await interaction.response.send_message("Please select viewers and enter a code value.", ephemeral=True)
+        if label_role_id in codes:
+            return await interaction.response.send_message("Code already exists for that label. Use update.", ephemeral=True)
+        codes[label_role_id] = {"value": code_value, "viewers": list(viewers)}
+        save_codes(codes)
+        role_names = ", ".join(
+            f"**{interaction.guild.get_role(int(r)).name}**" for r in viewers if interaction.guild.get_role(int(r))
+        )
+        await interaction.response.send_message(
+            f"Code for **{interaction.guild.get_role(int(label_role_id)).name}** added. Viewable by: {role_names}", ephemeral=True
+        )
+        await interaction.delete_original_response()
+
+class UpdateCodeButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Update Code", style=discord.ButtonStyle.primary, custom_id="update_code")
+
+    async def callback(self, interaction: discord.Interaction):
+        label_roles = [interaction.guild.get_role(int(rid)) for rid in codes.keys() if interaction.guild.get_role(int(rid))]
+        if not label_roles:
+            return await interaction.response.send_message("No codes exist yet.", ephemeral=True)
+        await interaction.response.send_message("Select a code to update:", view=UpdateCodeLabelView(label_roles), ephemeral=True)
+
+class UpdateCodeLabelView(discord.ui.View):
+    def __init__(self, label_roles):
+        super().__init__(timeout=60)
+        self.add_item(LabelRoleSelect(label_roles, "Select code to update"))
+
+    @discord.ui.select(cls=LabelRoleSelect)
+    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
+        label_role_id = select.values[0]
+        all_roles = [role for role in interaction.guild.roles if not role.is_bot_managed() and role.name != "@everyone"]
+        current_code = codes[label_role_id]["value"]
+        await interaction.response.edit_message(content=f"Now select new viewers and code value (current: `{current_code}`):", view=UpdateCodeView(label_role_id, all_roles))
+
+class UpdateCodeView(discord.ui.View):
+    def __init__(self, label_role_id, roles):
+        super().__init__(timeout=60)
+        self.label_role_id = label_role_id
+        self.selected_viewers = []
+        self.add_item(RoleMultiSelect(roles, "Select new viewer roles", min_values=1, max_values=10))
+        self.code_value = discord.ui.TextInput(label="New Code Value", style=discord.TextStyle.short)
+        self.add_item(self.code_value)
+
+    @discord.ui.select(cls=RoleMultiSelect)
+    async def select_viewers(self, interaction: discord.Interaction, select: RoleMultiSelect):
+        self.selected_viewers = select.values
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Submit", style=discord.ButtonStyle.green)
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        label_role_id = self.label_role_id
+        viewers = self.selected_viewers
+        code_value = self.code_value.value
+        if not viewers or not code_value:
+            return await interaction.response.send_message("Please select viewers and enter a code value.", ephemeral=True)
+        if label_role_id not in codes:
+            return await interaction.response.send_message("No code exists for that label. Use add.", ephemeral=True)
+        role_names = ", ".join(
+            f"**{interaction.guild.get_role(int(r)).name}**" for r in viewers if interaction.guild.get_role(int(r))
+        )
+        await interaction.response.send_message(
+            f"Are you sure you want to update code for **{interaction.guild.get_role(int(label_role_id)).name}** to `{code_value}` (viewable by: {role_names})?",
+            ephemeral=True,
+            view=ConfirmUpdateView(label_role_id, viewers, code_value)
+        )
+
+class ConfirmUpdateView(discord.ui.View):
+    def __init__(self, label_role_id, viewers, code_value):
+        super().__init__(timeout=30)
+        self.label_role_id = label_role_id
+        self.viewers = viewers
+        self.code_value = code_value
+
+    @discord.ui.button(label="Yes, update", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        codes[self.label_role_id] = {"value": self.code_value, "viewers": list(self.viewers)}
+        save_codes(codes)
+        role_names = ", ".join(
+            f"**{interaction.guild.get_role(int(r)).name}**" for r in self.viewers if interaction.guild.get_role(int(r))
+        )
+        await interaction.response.edit_message(content=f"Code updated. Now viewable by: {role_names}", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Update cancelled.", view=None)
+
+class RemoveCodeButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Remove Code", style=discord.ButtonStyle.danger, custom_id="remove_code")
+
+    async def callback(self, interaction: discord.Interaction):
+        label_roles = [interaction.guild.get_role(int(rid)) for rid in codes.keys() if interaction.guild.get_role(int(rid))]
+        if not label_roles:
+            return await interaction.response.send_message("No codes exist yet.", ephemeral=True)
+        await interaction.response.send_message("Select a code to remove:", view=RemoveCodeView(label_roles), ephemeral=True)
+
+class RemoveCodeView(discord.ui.View):
+    def __init__(self, label_roles):
+        super().__init__(timeout=60)
+        self.add_item(LabelRoleSelect(label_roles, "Select code to remove"))
+
+    @discord.ui.select(cls=LabelRoleSelect)
+    async def select_label(self, interaction: discord.Interaction, select: LabelRoleSelect):
+        label_role_id = select.values[0]
+        if label_role_id not in codes:
+            return await interaction.response.send_message("No code exists for that label.", ephemeral=True)
+        role_name = interaction.guild.get_role(int(label_role_id)).name
+        await interaction.response.send_message(
+            f"Are you sure you want to remove the code for **{role_name}**?",
+            ephemeral=True,
+            view=ConfirmRemoveView(label_role_id, role_name)
+        )
+
+class ConfirmRemoveView(discord.ui.View):
+    def __init__(self, label_role_id, role_name):
+        super().__init__(timeout=30)
+        self.label_role_id = label_role_id
+        self.role_name = role_name
+
+    @discord.ui.button(label="Yes, remove", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        del codes[self.label_role_id]
+        save_codes(codes)
+        await interaction.response.edit_message(content=f"Code for **{self.role_name}** has been removed.", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Removal cancelled.", view=None)
+
+@bot.tree.command(name="codes", description="Show code management UI")
+async def codes_command(inter: discord.Interaction):
+    await inter.response.send_message(
+        "Manage/view codes:",
+        view=CodesMenuView(inter.user),
+        ephemeral=True
+    )
 
 # ══════════════════════════════════════════════════════════════════
-#  Reviewer list helpers
+#  Reviewer List helpers
 # ══════════════════════════════════════════════════════════════════
+bot.review_team = set()  # type: Set[int]
+bot.last_anonymous_time = {}  # type: Dict[int, datetime]
+bot.giveaway_stop_events = {}  # type: Dict[int, asyncio.Event]
+
 def load_reviewers() -> None:
     if os.path.isfile(REVIEW_FILE):
         try:
@@ -128,9 +347,6 @@ def save_activity() -> None:
 
 load_activity()
 
-# ══════════════════════════════════════════════════════════════════
-#  NEW — autosave & graceful-shutdown helpers
-# ══════════════════════════════════════════════════════════════════
 def _dump_all() -> None:
     save_reviewers()
     save_activity()
@@ -149,9 +365,8 @@ async def _periodic_autosave() -> None:
         await asyncio.sleep(60)
         _dump_all()
 
-# =========================================================================
-#  ACTIVITY LOGIC (unchanged from your file)
-# =========================================================================
+# ========== ACTIVITY LOGIC ==========
+
 def mark_active(member: discord.Member) -> None:
     if member.bot:
         return
@@ -264,9 +479,8 @@ async def on_voice_state_update(member, before, after):
     ):
         mark_active(member)
 
-# =========================================================================
-#  GIVEAWAYS (unchanged)
-# =========================================================================
+# ========== GIVEAWAYS ==========
+
 def fmt_time(s: int) -> str:
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
@@ -455,9 +669,8 @@ async def giveaway(
         f"Giveaway started in {ch.mention}.", ephemeral=True
     )
 
-# =========================================================================
-#  FEEDBACK  (unchanged)
-# =========================================================================
+# ========== FEEDBACK ==========
+
 @bot.tree.command(name="feedback")
 @app_commands.describe(message="Your feedback", anonymous="Send anonymously?")
 async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
@@ -496,9 +709,8 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
     await ch.send(embed=embed)
     await inter.response.send_message("Thanks!", ephemeral=True)
 
-# =========================================================================
-#  Reviewer commands (unchanged)
-# =========================================================================
+# ========== REVIEWER COMMANDS ==========
+
 def is_admin(i: discord.Interaction) -> bool:
     return i.user.guild_permissions.administrator or i.user.id == bot.owner_id
 
@@ -522,9 +734,8 @@ async def list_reviewers(i: discord.Interaction):
     txt = ", ".join(f"<@{u}>" for u in bot.review_team) or "None."
     await i.response.send_message(txt, ephemeral=True)
 
-# =========================================================================
-#  REGISTRATION WORKFLOW (unchanged)
-# =========================================================================
+# ========== REGISTRATION WORKFLOW ==========
+
 def opts(*lbl: str):
     return [discord.SelectOption(label=l, value=l) for l in lbl]
 
@@ -832,100 +1043,9 @@ async def memberform(inter: discord.Interaction):
     )
 
 # ══════════════════════════════════════════════════════════════════
-#  CODE SYSTEM: Slash Command Group (multi-role view support!)
+#  READY HANDLER, AUTOSAVE, ETC (unchanged)
 # ══════════════════════════════════════════════════════════════════
 
-class CodeCommands(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="code", description="Access or manage role codes")
-
-    @app_commands.command(name="show", description="Show all codes for your roles")
-    async def show(self, inter: discord.Interaction):
-        if not inter.guild:
-            return await inter.response.send_message("Must be used in a server.", ephemeral=True)
-        user_roles = {str(r.id) for r in inter.user.roles} if hasattr(inter.user, "roles") else set()
-        found = []
-        for code_label_role_id, data in codes.items():
-            viewers = set(data.get("viewers", []))
-            if user_roles & viewers:
-                role = inter.guild.get_role(int(code_label_role_id))
-                code_val = data["value"]
-                found.append(f"**{role.name if role else code_label_role_id}**: `{code_val}`")
-        if found:
-            msg = "Your codes:\n" + "\n".join(found)
-        else:
-            msg = "You don't have any codes assigned to your roles."
-        await inter.response.send_message(msg, ephemeral=True)
-
-    @app_commands.command(name="add", description="Add a code for one or more roles (admin only)")
-    @app_commands.describe(
-        code_label_role="The role that labels this code (for admin reference)",
-        can_view="Roles that are allowed to see this code",
-        value="The code value"
-    )
-    async def add(self, inter: discord.Interaction, code_label_role: discord.Role, can_view: list[discord.Role], value: str):
-        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
-            return await inter.response.send_message("You don't have permission.", ephemeral=True)
-        rid = str(code_label_role.id)
-        if rid in codes:
-            return await inter.response.send_message(
-                f"A code already exists for **{code_label_role.name}**. Use `/code update`.", ephemeral=True
-            )
-        if not can_view:
-            return await inter.response.send_message("You must select at least one role for 'can_view'.", ephemeral=True)
-        codes[rid] = {
-            "value": value,
-            "viewers": [str(role.id) for role in can_view]
-        }
-        save_codes(codes)
-        allowed_names = ", ".join(f"**{role.name}**" for role in can_view)
-        await inter.response.send_message(
-            f"Code for **{code_label_role.name}** added. Viewable by: {allowed_names}", ephemeral=True
-        )
-
-    @app_commands.command(name="update", description="Update code value and which roles can view it (admin only)")
-    @app_commands.describe(
-        code_label_role="The code label (role) to update",
-        can_view="Roles that are allowed to see this code",
-        value="The new code value"
-    )
-    async def update(self, inter: discord.Interaction, code_label_role: discord.Role, can_view: list[discord.Role], value: str):
-        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
-            return await inter.response.send_message("You don't have permission.", ephemeral=True)
-        rid = str(code_label_role.id)
-        if rid not in codes:
-            return await inter.response.send_message(
-                f"No code exists for **{code_label_role.name}** yet. Use `/code add` first.", ephemeral=True
-            )
-        if not can_view:
-            return await inter.response.send_message("You must select at least one role for 'can_view'.", ephemeral=True)
-        codes[rid]["value"] = value
-        codes[rid]["viewers"] = [str(role.id) for role in can_view]
-        save_codes(codes)
-        allowed_names = ", ".join(f"**{role.name}**" for role in can_view)
-        await inter.response.send_message(
-            f"Code for **{code_label_role.name}** updated. Now viewable by: {allowed_names}", ephemeral=True
-        )
-
-    @app_commands.command(name="remove", description="Remove code for a role (admin only)")
-    @app_commands.describe(code_label_role="The code label (role) to remove")
-    async def remove(self, inter: discord.Interaction, code_label_role: discord.Role):
-        if not inter.user.guild_permissions.administrator and inter.user.id != bot.owner_id:
-            return await inter.response.send_message("You don't have permission.", ephemeral=True)
-        rid = str(code_label_role.id)
-        if rid not in codes:
-            return await inter.response.send_message(
-                f"No code exists for **{code_label_role.name}**.", ephemeral=True
-            )
-        del codes[rid]
-        save_codes(codes)
-        await inter.response.send_message(f"Code for **{code_label_role.name}** has been removed.", ephemeral=True)
-
-bot.tree.add_command(CodeCommands())
-
-# ══════════════════════════════════════════════════════════════════
-#  READY — create autosave task & register signal handlers
-# ══════════════════════════════════════════════════════════════════
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
