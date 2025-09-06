@@ -11,10 +11,10 @@ from random import choice
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Configuration ─ read from env or fall back to literals
+#  Configuration (IDs can stay hard-coded; secrets via env)
 # ══════════════════════════════════════════════════════════════════
-BOT_TOKEN   = os.getenv("BOT_TOKEN")                 # REQUIRED – don’t hard-code!
-GUILD_ID    = int(os.getenv("GUILD_ID", 1377035207777194005))
+BOT_TOKEN = os.getenv("BOT_TOKEN")                    # <── put in Railway Variables
+GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
 
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1413672763108888636
@@ -35,8 +35,8 @@ FOCUS_ROLE_IDS = {
     "PvP":          1408687710159245362,
 }
 
-TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60            # 7-day temp ban
-GIVEAWAY_ROLE_ID     = 1403337937722019931          # “Active Member”
+TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60          # 7-day temp ban
+GIVEAWAY_ROLE_ID     = 1403337937722019931       # “Active Member”
 GIVEAWAY_CH_ID       = 1413929735658016899
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG       = "END:"
@@ -46,9 +46,11 @@ PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
-# ── paths for JSON persistence (change DATA_DIR to /data on Railway) ─────────
-DATA_DIR      = os.getenv("DATA_DIR", ".")
-os.makedirs(DATA_DIR, exist_ok=True)
+# ─── persistent storage path ─────────────────────────────────────
+# Railway mounts the volume at /data   (set DATA_DIR env to override)
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+os.makedirs(DATA_DIR, exist_ok=True)             # works locally too
+
 REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
 ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
 
@@ -150,7 +152,6 @@ def members_to_warn(guild: discord.Guild):
     warn_cut = _cutoff(WARN_BEFORE_DAYS)
     kick_cut = _cutoff(INACTIVE_AFTER_DAYS)
     role = guild.get_role(GIVEAWAY_ROLE_ID)
-
     if not role:
         return []
 
@@ -242,8 +243,8 @@ async def on_voice_state_update(member, before, after):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  GIVEAWAYS
-# ═════════════════════════════════════════════════════════════════=
+#  GIVEAWAYS (restart-safe)
+# ══════════════════════════════════════════════════════════════════
 def fmt_time(s: int) -> str:
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
@@ -512,7 +513,7 @@ async def list_reviewers(i: discord.Interaction):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  REGISTRATION WORKFLOW (unchanged core logic)
+#  REGISTRATION WORKFLOW (unchanged logic)
 # ══════════════════════════════════════════════════════════════════
 def opts(*lbl: str):
     return [discord.SelectOption(label=l, value=l) for l in lbl]
