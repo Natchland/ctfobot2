@@ -1,9 +1,11 @@
 /* Dark background + neon accents */
 :root {
-  --bg: #121212;             /* dark grey */
-  --card: #1e1e1e;
-  --neon: #ff2164;           /* hot pink/red */
-  --neon-glow: #ff21644f;
+  --bg:   #121212;        /* dark grey */
+  --card: #1e1e1e;        /* card surface */
+
+  /* new accent colours */
+  --neon:      #ff2e2e;   /* vibrant red */
+  --neon-glow: #ff8c0045; /* translucent orange glow */
 }
 
 html,body {
