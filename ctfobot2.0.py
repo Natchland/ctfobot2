@@ -1,25 +1,22 @@
-import os
-import sys
-import asyncio
-import signal
-import discord
-import asyncpg
-import json
+import os, sys, asyncio, signal, json
+from datetime import datetime, timedelta, timezone, date
+from random import choice
+from typing import Dict, Any
+
+import discord, asyncpg
 from discord import app_commands
 from discord.ext import commands
-from datetime import datetime, timedelta, timezone, date
-from typing import Dict, Any
-from random import choice
 
-# ══ Configuration ═══════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-GUILD_ID = int(os.getenv("GUILD_ID", "1377035207777194005"))
-FEEDBACK_CH = 1413188006499586158
+# ══ Configuration ═════════════════════════════════════════════════════
+BOT_TOKEN      = os.getenv("BOT_TOKEN")
+DATABASE_URL   = os.getenv("DATABASE_URL")
+GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
+
+FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1413672763108888636
-WARNING_CH_ID = 1398657081338237028
+WARNING_CH_ID  = 1398657081338237028
 
-ACCEPT_ROLE_ID = 1377075930144571452
+ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
     "North America": 1411364406096433212,
     "Europe":        1411364744484491287,
@@ -33,38 +30,40 @@ FOCUS_ROLE_IDS = {
     "Electricity":  1380233234675400875,
     "PvP":          1408687710159245362,
 }
-TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60
-GIVEAWAY_ROLE_ID     = 1403337937722019931
-GIVEAWAY_CH_ID       = 1413929735658016899
-CODES_CH_ID          = 1398667158237483138
-EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
-FOOTER_END_TAG       = "END:"
-FOOTER_PRIZE_TAG     = "PRIZE:"
-PROMOTE_STREAK       = 3
-INACTIVE_AFTER_DAYS  = 5
-WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
-ADMIN_ID = 1377103244089622719
-ELECTRICIAN_ID = 1380233234675400875
+TEMP_BAN_SECONDS    = 7 * 24 * 60 * 60
+GIVEAWAY_ROLE_ID    = 1403337937722019931
+GIVEAWAY_CH_ID      = 1413929735658016899
+CODES_CH_ID         = 1398667158237483138
+EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
+FOOTER_END_TAG      = "END:"
+FOOTER_PRIZE_TAG    = "PRIZE:"
+PROMOTE_STREAK      = 3
+INACTIVE_AFTER_DAYS = 5
+WARN_BEFORE_DAYS    = INACTIVE_AFTER_DAYS - 1
+
+ADMIN_ID        = 1377103244089622719
+ELECTRICIAN_ID  = 1380233234675400875
 GROUP_LEADER_ID = 1377077466513932338
-PLAYER_MGMT_ID = 1377084533706588201
-TRUSTED_ID = 1400584430900219935
+PLAYER_MGMT_ID  = 1377084533706588201
+TRUSTED_ID      = 1400584430900219935
 
 CODE_NAMES = ["Master", "Guest", "Electrician", "Other"]
 
-# ══ Bot/intents ═════════════════════════════
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-bot = commands.Bot("!", intents=intents)
+# ══ Bot / intents ═════════════════════════════════════════════════════
+intents                    = discord.Intents.default()
+intents.members            = True
+intents.message_content    = True
+bot                        = commands.Bot("!", intents=intents)
+bot.last_anonymous_time    = {}
+bot.giveaway_stop_events   = {}
 
-bot.last_anonymous_time = {}
-bot.giveaway_stop_events = {}
-
-# ══ Database helpers ════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+#                          DATABASE LAYER
+# ══════════════════════════════════════════════════════════════════════
 class Database:
-    def __init__(self, dsn):
-        self.dsn = dsn
+    def __init__(self, dsn: str):
+        self.dsn  = dsn
         self.pool = None
 
     async def connect(self):
@@ -74,264 +73,341 @@ class Database:
     async def init_tables(self):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS codes (
-                    name TEXT PRIMARY KEY,
-                    pin VARCHAR(4) NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS reviewers (
-                    user_id BIGINT PRIMARY KEY
-                );
-                CREATE TABLE IF NOT EXISTS activity (
-                    user_id BIGINT PRIMARY KEY,
-                    streak INTEGER,
-                    date DATE,
-                    warned BOOLEAN,
-                    last TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS giveaways (
-                    id SERIAL PRIMARY KEY,
-                    channel_id BIGINT,
-                    message_id BIGINT,
-                    prize TEXT,
-                    end_ts BIGINT,
-                    active BOOLEAN
-                );
-                CREATE TABLE IF NOT EXISTS member_forms (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    created_at TIMESTAMP DEFAULT now(),
-                    data JSONB
-                );
+            CREATE TABLE IF NOT EXISTS codes (
+                name   TEXT PRIMARY KEY,
+                pin    VARCHAR(4) NOT NULL,
+                public BOOLEAN    NOT NULL DEFAULT FALSE
+            );
+            CREATE TABLE IF NOT EXISTS reviewers (
+                user_id BIGINT PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS activity (
+                user_id BIGINT PRIMARY KEY,
+                streak  INTEGER,
+                date    DATE,
+                warned  BOOLEAN,
+                last    TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS giveaways (
+                id         SERIAL PRIMARY KEY,
+                channel_id BIGINT,
+                message_id BIGINT,
+                prize      TEXT,
+                end_ts     BIGINT,
+                active     BOOLEAN
+            );
+            CREATE TABLE IF NOT EXISTS member_forms (
+                id         SERIAL PRIMARY KEY,
+                user_id    BIGINT,
+                created_at TIMESTAMP DEFAULT now(),
+                data       JSONB
+            );
             """)
 
-    # Codes
-    async def get_codes(self):
+    # ── Codes ────────────────────────────────────────────────────────
+    async def get_codes(self, *, only_public: bool = False):
+        q = "SELECT name, pin, public FROM codes"
+        if only_public:
+            q += " WHERE public=TRUE"
+        q += " ORDER BY name"
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT name, pin FROM codes ORDER BY name")
-            return {r['name']: r['pin'] for r in rows}
+            rows = await conn.fetch(q)
+            # return {name: (pin, public)}
+            return {r["name"]: (r["pin"], r["public"]) for r in rows}
 
-    async def add_code(self, name, pin):
+    async def add_code(self, name: str, pin: str, public: bool):
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO codes (name, pin) VALUES ($1, $2)", name, pin)
+            await conn.execute("""
+                INSERT INTO codes (name, pin, public)
+                VALUES ($1,$2,$3)
+                ON CONFLICT(name) DO UPDATE
+                  SET pin=$2, public=$3
+            """, name, pin, public)
 
-    async def edit_code(self, name, pin):
+    async def edit_code(self, name: str, pin: str, public: bool | None = None):
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE codes SET pin=$2 WHERE name=$1", name, pin)
+            if public is None:
+                await conn.execute(
+                    "UPDATE codes SET pin=$2 WHERE name=$1",
+                    name, pin
+                )
+            else:
+                await conn.execute(
+                    "UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
+                    name, pin, public
+                )
 
-    async def remove_code(self, name):
+    async def remove_code(self, name: str):
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM codes WHERE name=$1", name)
 
-    # Reviewers
+    # ── Reviewers ────────────────────────────────────────────────────
     async def get_reviewers(self):
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT user_id FROM reviewers")
-            return set(r['user_id'] for r in rows)
+            return {r["user_id"] for r in rows}
 
-    async def add_reviewer(self, user_id):
+    async def add_reviewer(self, uid: int):
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+            await conn.execute(
+                "INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                uid
+            )
 
-    async def remove_reviewer(self, user_id):
+    async def remove_reviewer(self, uid: int):
         async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM reviewers WHERE user_id=$1", user_id)
+            await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
 
-    # Activity
-    async def get_activity(self, user_id):
+    # ── Activity ─────────────────────────────────────────────────────
+    async def get_activity(self, uid: int):
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM activity WHERE user_id=$1", user_id)
+            row = await conn.fetchrow("SELECT * FROM activity WHERE user_id=$1", uid)
             return dict(row) if row else None
 
-    async def set_activity(self, user_id, streak, date, warned, last):
+    async def set_activity(self, uid, streak, date_, warned, last):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO activity (user_id, streak, date, warned, last)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (user_id)
-                DO UPDATE SET streak=$2, date=$3, warned=$4, last=$5
-            """, user_id, streak, date, warned, last)
+            INSERT INTO activity (user_id, streak, date, warned, last)
+            VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT(user_id) DO UPDATE
+              SET streak=$2, date=$3, warned=$4, last=$5
+            """, uid, streak, date_, warned, last)
 
     async def get_all_activity(self):
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM activity")
             return {r['user_id']: dict(r) for r in rows}
 
-    # Giveaways
-    async def add_giveaway(self, channel_id, message_id, prize, end_ts):
+    # ── Giveaways ────────────────────────────────────────────────────
+    async def add_giveaway(self, ch_id, msg_id, prize, end_ts):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO giveaways (channel_id, message_id, prize, end_ts, active)
-                VALUES ($1, $2, $3, $4, TRUE)
-            """, channel_id, message_id, prize, end_ts)
+            INSERT INTO giveaways (channel_id, message_id, prize, end_ts, active)
+            VALUES ($1,$2,$3,$4,TRUE)
+            """, ch_id, msg_id, prize, end_ts)
 
-    async def end_giveaway(self, message_id):
+    async def end_giveaway(self, msg_id):
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE giveaways SET active=FALSE WHERE message_id=$1", message_id)
+            await conn.execute("UPDATE giveaways SET active=FALSE WHERE message_id=$1",
+                               msg_id)
 
     async def get_active_giveaways(self):
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM giveaways WHERE active=TRUE")
             return [dict(r) for r in rows]
 
-    # Member forms
-    async def add_member_form(self, user_id, data):
+    # ── Member-forms ────────────────────────────────────────────────
+    async def add_member_form(self, uid, data: dict):
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO member_forms (user_id, data) VALUES ($1, $2)", user_id, json.dumps(data))
+            await conn.execute(
+                "INSERT INTO member_forms (user_id, data) VALUES ($1,$2)",
+                uid, json.dumps(data)
+            )
 
-    async def get_member_forms(self, user_id=None):
+    async def get_member_forms(self, uid: int | None = None):
         async with self.pool.acquire() as conn:
-            if user_id:
-                rows = await conn.fetch("SELECT * FROM member_forms WHERE user_id=$1", user_id)
+            if uid:
+                rows = await conn.fetch("SELECT * FROM member_forms WHERE user_id=$1",
+                                        uid)
             else:
                 rows = await conn.fetch("SELECT * FROM member_forms")
             return [dict(r) for r in rows]
 
+
 db = Database(DATABASE_URL)
 
-# ══ Codes Embed Utilities ═══════════════════
-def build_codes_embed(codes: dict) -> discord.Embed:
-    embed = discord.Embed(
+# ══════════════════════════════════════════════════════════════════════
+#                        UTILITIES  /  EMBEDS
+# ══════════════════════════════════════════════════════════════════════
+def build_codes_embed(codes: dict[str, tuple[str, bool]]) -> discord.Embed:
+    """
+    codes = {name: (pin, public)}
+    """
+    e = discord.Embed(
         title="🔑 Access Codes",
-        description="Below are the current access codes. Contact an admin if you need access.",
-        color=discord.Color.blue(),
+        description="Codes with 🔒 are **private** (not returned by /codes list).",
+        colour=discord.Color.blue()
     )
-    if codes:
-        for name, pin in codes.items():
-            embed.add_field(name=name, value=f"`{pin}`", inline=False)
+    if not codes:
+        e.description += "\n\n*No codes configured yet.*"
     else:
-        embed.description += "\n\n*No codes set yet.*"
-    embed.set_footer(text="Code list is kept up to date by staff.")
-    return embed
+        for name, (pin, pub) in codes.items():
+            lock = "" if pub else " 🔒"
+            e.add_field(name=f"{name}{lock}", value=f"`{pin}`", inline=False)
+    e.set_footer(text="Last updated")
+    return e
 
-async def update_codes_message(bot, codes: dict):
+
+async def update_codes_message(bot: commands.Bot, codes: dict):
+    """
+    Always EDIT a single persistent message in the codes channel.
+    The message id is saved to /data/codes_msg_id.txt.
+    """
     channel = bot.get_channel(CODES_CH_ID)
     if not channel:
-        print("Codes channel missing!")
+        print("Codes channel not found!")
         return
 
-    msg_id_file = "codes_msg_id.txt"
-    msg_id = None
-    if os.path.isfile(msg_id_file):
-        with open(msg_id_file, "r") as f:
-            try:
-                msg_id = int(f.read().strip())
-            except Exception:
-                pass
+    store = "/data/codes_msg_id.txt"
+    msg_id: int | None = None
+    if os.path.exists(store):
+        try:
+            msg_id = int(open(store).read().strip())
+        except Exception:
+            msg_id = None
 
     embed = build_codes_embed(codes)
+
     if msg_id:
         try:
             msg = await channel.fetch_message(msg_id)
             await msg.edit(embed=embed)
             return
-        except Exception:
-            pass
+        except discord.NotFound:
+            pass            # message deleted – fall through and send a new one.
 
     msg = await channel.send(embed=embed)
-    with open(msg_id_file, "w") as f:
-        f.write(str(msg.id))
+    os.makedirs("/data", exist_ok=True)
+    with open(store, "w") as fp:
+        fp.write(str(msg.id))
 
-# ══ Reviewer List helpers (DB-backed) ══════
+# ══════════════════════════════════════════════════════════════════════
 async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
     reviewers = await db.get_reviewers()
     return inter.user.guild_permissions.administrator or inter.user.id in reviewers
 
-# ══ Activity Helper (DB-backed) ════════════
+# ═══════════════════════════  ACTIVITY TRACKER  ═══════════════════════
 async def mark_active(member: discord.Member):
     if member.bot:
         return
     today = date.today()
     rec = await db.get_activity(member.id)
     if not rec:
-        streak = 1
-        warned = False
+        streak, warned = 1, False
     else:
-        if rec['date'] != today:
-            lastdate = rec['date']
-            yesterday = lastdate + timedelta(days=1)
-            streak = rec['streak'] + 1 if yesterday == today else 1
+        if rec["date"] != today:
+            yesterday = rec["date"] + timedelta(days=1)
+            streak = rec["streak"] + 1 if yesterday == today else 1
             warned = False
         else:
-            streak = rec['streak']
-            warned = rec['warned']
-    last = datetime.now(timezone.utc)
-    await db.set_activity(member.id, streak, today, warned, last)
+            streak, warned = rec["streak"], rec["warned"]
+    await db.set_activity(member.id, streak, today, warned,
+                          datetime.now(timezone.utc))
 
 @bot.event
-async def on_message(msg: discord.Message):
-    if msg.guild and not msg.author.bot:
-        await mark_active(msg.author)
+async def on_message(m: discord.Message):
+    if m.guild and not m.author.bot:
+        await mark_active(m.author)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if (
-        member.guild.id == GUILD_ID
-        and not member.bot
-        and not before.channel
-        and after.channel
-    ):
+    if member.guild.id == GUILD_ID and not member.bot and not before.channel and after.channel:
         await mark_active(member)
 
-# ========== /codes command group ==========
+# ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
-    def __init__(self, bot, db):
-        self.bot = bot
-        self.db = db
+    def __init__(self, bot_, db_):
+        self.bot, self.db = bot_, db_
 
-    codes_group = app_commands.Group(name="codes", description="Manage access codes")
+    codes_group = app_commands.Group(
+        name="codes",
+        description="Manage / view access codes"
+    )
 
-
+    # ----------  /codes add  ----------
     @codes_group.command(name="add", description="Add a new code")
-    @app_commands.describe(name="Name of the code", pin="4-digit code (e.g. 1234)")
-    async def codes_add(self, inter: discord.Interaction, name: str, pin: str):
+    @app_commands.describe(
+        name="Code name",
+        pin="4-digit number",
+        public="Visible to everyone with /codes list?"
+    )
+    async def codes_add(
+        self,
+        inter: discord.Interaction,
+        name: str,
+        pin: str,
+        public: bool = False
+    ):
         if not await is_admin_or_reviewer(inter):
-            await inter.response.send_message("You need admin permission.", ephemeral=True)
-            return
+            return await inter.response.send_message("Permission denied.",
+                                                     ephemeral=True)
 
         codes = await self.db.get_codes()
         if name in codes:
-            await inter.response.send_message("A code with that name already exists.", ephemeral=True)
-            return
+            return await inter.response.send_message(
+                "A code with that name already exists. Use /codes edit.",
+                ephemeral=True
+            )
         if not (pin.isdigit() and len(pin) == 4):
-            await inter.response.send_message("PIN must be a 4-digit number.", ephemeral=True)
-            return
-        await self.db.add_code(name, pin)
-        codes = await self.db.get_codes()
-        await update_codes_message(self.bot, codes)
-        await inter.response.send_message(f"Added code `{name}: {pin}`.", ephemeral=True)
+            return await inter.response.send_message("PIN must be 4 digits.",
+                                                     ephemeral=True)
 
-    @codes_group.command(name="edit", description="Edit the PIN for an existing code")
-    @app_commands.describe(name="Name of the code", pin="New 4-digit code")
-    async def codes_edit(self, inter: discord.Interaction, name: str, pin: str):
+        await self.db.add_code(name, pin, public)
+        await update_codes_message(self.bot, await self.db.get_codes())
+        await inter.response.send_message(
+            f"Added **{name}** (`{pin}`) {'(public)' if public else '(private)'}.",
+            ephemeral=True
+        )
+
+    # ----------  /codes edit  ----------
+    @codes_group.command(name="edit", description="Modify an existing code")
+    @app_commands.describe(
+        name="Existing code name",
+        pin="New 4-digit pin",
+        public="Leave blank to keep current visibility"
+    )
+    async def codes_edit(
+        self,
+        inter: discord.Interaction,
+        name: str,
+        pin: str,
+        public: bool | None = None
+    ):
         if not await is_admin_or_reviewer(inter):
-            await inter.response.send_message("You need admin permission.", ephemeral=True)
-            return
+            return await inter.response.send_message("Permission denied.",
+                                                     ephemeral=True)
+
         codes = await self.db.get_codes()
         if name not in codes:
-            await inter.response.send_message("No such code.", ephemeral=True)
-            return
+            return await inter.response.send_message("No such code.",
+                                                     ephemeral=True)
         if not (pin.isdigit() and len(pin) == 4):
-            await inter.response.send_message("PIN must be a 4-digit number.", ephemeral=True)
-            return
-        await self.db.edit_code(name, pin)
-        codes = await self.db.get_codes()
-        await update_codes_message(self.bot, codes)
-        await inter.response.send_message(f"Updated code `{name}: {pin}`.", ephemeral=True)
+            return await inter.response.send_message("PIN must be 4 digits.",
+                                                     ephemeral=True)
 
-    @codes_group.command(name="remove", description="Remove a code")
-    @app_commands.describe(name="Name of the code to remove")
+        await self.db.edit_code(name, pin, public)
+        await update_codes_message(self.bot, await self.db.get_codes())
+        await inter.response.send_message("Code updated.", ephemeral=True)
+
+    # ----------  /codes remove  ----------
+    @codes_group.command(name="remove", description="Delete a code")
+    @app_commands.describe(name="Code name to remove")
     async def codes_remove(self, inter: discord.Interaction, name: str):
         if not await is_admin_or_reviewer(inter):
-            await inter.response.send_message("You need admin permission.", ephemeral=True)
-            return
+            return await inter.response.send_message("Permission denied.",
+                                                     ephemeral=True)
+
         codes = await self.db.get_codes()
         if name not in codes:
-            await inter.response.send_message("No such code.", ephemeral=True)
-            return
+            return await inter.response.send_message("No such code.",
+                                                     ephemeral=True)
+
         await self.db.remove_code(name)
-        codes = await self.db.get_codes()
-        await update_codes_message(self.bot, codes)
-        await inter.response.send_message(f"Removed code `{name}`.", ephemeral=True)
+        await update_codes_message(self.bot, await self.db.get_codes())
+        await inter.response.send_message("Code removed.", ephemeral=True)
+
+    # ----------  /codes list  ----------
+    @codes_group.command(name="list", description="Show public codes")
+    async def codes_list(self, inter: discord.Interaction):
+        pub = await self.db.get_codes(only_public=True)
+        if not pub:
+            return await inter.response.send_message(
+                "No public codes currently.",
+                ephemeral=True
+            )
+        lines = [f"• **{n}**: `{pin}`" for n, (pin, _) in pub.items()]
+        await inter.response.send_message("\n".join(lines), ephemeral=True)
+
 
 codes_cog = CodesCog(bot, db)
 bot.tree.add_command(codes_cog.codes_group)
