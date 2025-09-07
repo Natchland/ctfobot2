@@ -1,0 +1,66 @@
+/* Dark background + neon accents */
+:root {
+  --bg: #121212;             /* dark grey */
+  --card: #1e1e1e;
+  --neon: #ff2164;           /* hot pink/red */
+  --neon-glow: #ff21644f;
+}
+
+html,body {
+  height: 100%;
+  background: var(--bg);
+  color: #fff;
+  font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+}
+
+/* Navbar --------------------------------------------------- */
+.navbar-brand,
+.nav-link,
+.navbar-text { color: #eee !important; }
+
+.navbar-brand {
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--neon) !important;
+  text-shadow: 0 0 6px var(--neon), 0 0 12px var(--neon-glow);
+}
+
+/* Neon Button ---------------------------------------------- */
+.neon-btn {
+  background: var(--neon);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 10px var(--neon), 0 0 4px var(--neon-glow);
+  transition: transform .15s;
+}
+.neon-btn:hover {
+  transform: translateY(-2px);
+  background: var(--neon);
+  box-shadow: 0 0 15px var(--neon), 0 0 6px var(--neon-glow);
+}
+.neon-btn:active { transform: translateY(0); }
+
+/* Cards / lists -------------------------------------------- */
+.card {
+  background: var(--card);
+  border: none;
+  box-shadow: 0 0 12px #000 inset, 0 0 6px var(--neon-glow);
+  border-radius: 14px;
+}
+.list-group-item {
+  background: #272727;
+  border: none;
+  color: #eee;
+}
+.badge-priv {
+  background: #f0ad4e;
+}
+
+/* Utilities ------------------------------------------------- */
+.center-vh {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
