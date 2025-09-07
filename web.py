@@ -1,34 +1,38 @@
 import os, datetime, asyncpg, httpx
+from pathlib import Path
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
 from fastapi import (
-    FastAPI, Request, Form, Depends,
-    Response, HTTPException, status
+    FastAPI, Request, Form, Response, HTTPException
 )
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+# ─────────────────────── Config ───────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")   # set on Railway
-OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY") # set on Railway
-
+WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")     # set on Railway
+OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")    # set on Railway
 COOKIE_NAME  = "ctfo_admin"
-pwd_ctx      = CryptContext(schemes=["bcrypt"], deprecated="auto")
-signer       = URLSafeSerializer(WEB_SECRET)
 
-app = FastAPI(debug=False)
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+signer  = URLSafeSerializer(WEB_SECRET)
+
+# ────────────────────── FastAPI ───────────────────────
+app       = FastAPI(debug=False)
 templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+static_path = Path("static")
+if static_path.exists():
+    app.mount("/static", StaticFiles(directory=static_path), name="static")
 
 db: asyncpg.Pool | None = None
 
-# ────────────────────────────────────────────────────────────────
+# ────────────────── DB startup / migration ─────────────
 @app.on_event("startup")
 async def startup():
     global db
     db = await asyncpg.create_pool(DATABASE_URL)
-    # create admin table if missing
     async with db.acquire() as conn:
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS admins (
@@ -38,8 +42,7 @@ async def startup():
         );
         """)
 
-# ────────────────────────────────────────────────────────────────
-# Auth helpers
+# ────────────────── Auth helpers ───────────────────────
 async def current_user(request: Request):
     token = request.cookies.get(COOKIE_NAME)
     if not token:
@@ -52,30 +55,26 @@ async def current_user(request: Request):
         row = await conn.fetchrow(
             "SELECT username, approved FROM admins WHERE username=$1", username
         )
-    if row and row["approved"]:
-        return row["username"]
-    return None
+    return row["username"] if row and row["approved"] else None
 
 def login_required(endpoint):
-    async def wrapper(request: Request, *args, **kwargs):
+    async def wrapper(request: Request, *args, **kw):
         user = await current_user(request)
         if user:
-            return await endpoint(request, user, *args, **kwargs)
+            return await endpoint(request, user, *args, **kw)
         return RedirectResponse("/login", status_code=303)
     return wrapper
 
-# ────────────────────────────────────────────────────────────────
-# Public  pages
+# ────────────────── Public page ────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def welcome(request: Request):
-    guild_id = os.getenv("GUILD_ID")
-    member_count = "?"
+    guild_id      = os.getenv("GUILD_ID")
+    member_count  = "?"
     if guild_id:
         try:
             async with httpx.AsyncClient() as cli:
                 r = await cli.get(
-                    f"https://discord.com/api/guilds/{guild_id}/widget.json",
-                    timeout=5
+                    f"https://discord.com/api/guilds/{guild_id}/widget.json", timeout=5
                 )
                 if r.status_code == 200:
                     member_count = len(r.json()["members"])
@@ -91,17 +90,13 @@ async def welcome(request: Request):
         },
     )
 
-# ────────────────────────────────────────────────────────────────
-# Sign-up / Login / Logout
+# ────────────────── Sign-up / Login / Logout ───────────
 @app.get("/signup", response_class=HTMLResponse)
 async def signup_get(request: Request):
     return templates.TemplateResponse("signup.html", {"request": request})
 
 @app.post("/signup")
-async def signup_post(
-    username: str = Form(...),
-    password: str = Form(...)
-):
+async def signup_post(username: str = Form(...), password: str = Form(...)):
     hash_ = pwd_ctx.hash(password)
     async with db.acquire() as conn:
         try:
@@ -116,8 +111,7 @@ async def signup_post(
 @app.get("/login", response_class=HTMLResponse)
 async def login_get(request: Request, pending: int | None = None):
     return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "pending": pending}
+        "login.html", {"request": request, "pending": pending}
     )
 
 @app.post("/login")
@@ -147,13 +141,9 @@ async def logout():
     resp.delete_cookie(COOKIE_NAME)
     return resp
 
-# ────────────────────────────────────────────────────────────────
-# Owner approval  (simple endpoint)
+# ────────────────── Owner approval endpoint ────────────
 @app.post("/approve")
-async def approve_user(
-    request: Request,
-    username: str = Form(...)
-):
+async def approve_user(request: Request, username: str = Form(...)):
     if request.headers.get("X-OWNER-KEY") != OWNER_KEY:
         raise HTTPException(status_code=403, detail="Bad owner key.")
     async with db.acquire() as conn:
@@ -162,8 +152,7 @@ async def approve_user(
         )
     return "approved"
 
-# ────────────────────────────────────────────────────────────────
-# Admin dashboard
+# ────────────────── Admin dashboard ─────────────────────
 @app.get("/admin", response_class=HTMLResponse)
 @login_required
 async def admin_panel(request: Request, user: str):
@@ -179,13 +168,13 @@ async def admin_panel(request: Request, user: str):
         },
     )
 
-# manage codes (protected)
+# ──────────────── Code management (protected) ───────────
 @app.post("/codes/add")
 @login_required
 async def add_code(
     request: Request, user: str,
     name: str = Form(...),
-    pin: str  = Form(...),
+    pin: str = Form(...),
     public: str | None = Form(None)
 ):
     if not (pin.isdigit() and len(pin) == 4):
@@ -200,10 +189,7 @@ async def add_code(
 
 @app.post("/codes/remove")
 @login_required
-async def remove_code(
-    request: Request, user: str,
-    name: str = Form(...)
-):
+async def remove_code(request: Request, user: str, name: str = Form(...)):
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM codes WHERE name=$1", name)
     return RedirectResponse("/admin", status_code=303)
