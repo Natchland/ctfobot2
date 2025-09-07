@@ -6,6 +6,8 @@ import asyncpg
 import os
 from datetime import datetime
 
+app = FastAPI(debug=True)
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
