@@ -3,17 +3,6 @@
     "builder": "NIXPACKS"
   },
 
-  "deploy": {
-    "startCommand": "python ctfobot2.0.py",
-
-    "healthcheckPath": null,
-
-    "resources": {
-      "memoryMb": 256,
-      "cpuCores": 0.1
-    }
-  },
-
   "volumes": [
     {
       "name": "data",

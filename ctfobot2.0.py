@@ -280,6 +280,7 @@ class CodesCog(commands.Cog):
 
     codes_group = app_commands.Group(name="codes", description="Manage access codes")
 
+
     @codes_group.command(name="add", description="Add a new code")
     @app_commands.describe(name="Name of the code", pin="4-digit code (e.g. 1234)")
     async def codes_add(self, inter: discord.Interaction, name: str, pin: str):

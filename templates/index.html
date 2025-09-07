@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head><title>Bot Admin Panel</title></head>
+<body>
+<h1>Codes</h1>
+<ul>
+{% for code in codes %}
+    <li>{{ code['name'] }}: <b>{{ code['pin'] }}</b>
+        <form action="/codes/remove" method="post" style="display:inline">
+            <input type="hidden" name="name" value="{{ code['name'] }}">
+            <button type="submit">Delete</button>
+        </form>
+    </li>
+{% endfor %}
+</ul>
+<form action="/codes/add" method="post">
+    <input name="name" placeholder="Code Name" required>
+    <input name="pin" placeholder="4-digit PIN" pattern="\d{4}" required>
+    <button type="submit">Add/Update Code</button>
+</form>
+</body>
+</html>
