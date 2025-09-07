@@ -72,24 +72,29 @@ def login_required(endpoint):
     Decorator that
       • checks the signed cookie
       • injects `user` into the real handler
-      • hides that extra parameter from FastAPI by exposing only `request`
+      • keeps all other parameters visible to FastAPI
     """
-    async def wrapper(request: Request, *args, **kwargs):
-        user = await current_user(request)
-        if not user:
-            return RedirectResponse("/login", status_code=303)
-        return await endpoint(request, user, *args, **kwargs)
+    sig = inspect.signature(endpoint)
 
-    # FastAPI inspects __signature__; expose only (request)
-    wrapper.__signature__ = inspect.Signature(
-        parameters=[
-            inspect.Parameter(
-                "request",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=Request,
-            )
-        ]
-    )
+    # Build a new parameter list: keep everything except the injected *user*
+    new_params = [
+        p
+        for name, p in sig.parameters.items()
+        if name != "user"
+    ]
+
+    async def wrapper(*args, **kwargs):
+        # `request` is always the first positional arg or a kwarg
+        request: Request = kwargs.get("request") or args[0]
+        logged_user = await current_user(request)
+        if not logged_user:
+            return RedirectResponse("/login", status_code=303)
+
+        # Forward the call with the injected user
+        return await endpoint(*args, logged_user, **kwargs)
+
+    # Tell FastAPI that the wrapper has the same signature minus the *user*
+    wrapper.__signature__ = inspect.Signature(parameters=new_params)
     wrapper.__name__ = endpoint.__name__
     wrapper.__doc__  = endpoint.__doc__
     return wrapper
