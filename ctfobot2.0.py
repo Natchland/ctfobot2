@@ -304,29 +304,36 @@ async def update_codes_message(bot: commands.Bot, codes: dict):
 # ──────────────────────────────────────────────────────────────────────
 #  Background listener – refresh codes embed when DB sends NOTIFY
 # ──────────────────────────────────────────────────────────────────────
-async def listen_for_code_changes():
+async def listen_for_code_changes() -> None:
     """
-    Dedicated connection LISTENing on 'codes_changed'.
-    We register an asyncpg listener callback instead of polling .notifies,
-    so every NOTIFY is delivered immediately.
+    Opens a dedicated connection, LISTENs on ‘codes_changed’ and edits the
+    embed every time a NOTIFY is received.  If something goes wrong we print
+    a warning instead of crashing the bot.
     """
     conn: asyncpg.Connection = await asyncpg.connect(DATABASE_URL)
 
-    async def _on_notify(*_):
-        # fetch fresh snapshot and update the embed
+    async def refresh_embed() -> None:
         try:
             codes = await db.get_codes()
             await update_codes_message(bot, codes)
-        except Exception as e:          # never let the listener crash
-            print("codes_changed listener error:", e)
+            print(f"[codes_changed] embed refreshed at {datetime.utcnow()}")
+        except Exception as exc:         # never let the callback die silently
+            print("[codes_changed] error while refreshing embed:", exc)
 
-    # register callback and start LISTEN
-    await conn.add_listener("codes_changed",
-                            lambda *args: asyncio.create_task(_on_notify()))
+    # asyncpg delivers (connection, pid, channel, payload) → we ignore extras
+    def _listener(*_):
+        # run refresh_embed in the main event-loop (non-blocking)
+        bot.loop.create_task(refresh_embed())
 
-    # keep the task alive forever
-    while not bot.is_closed():
-        await asyncio.sleep(3600)
+    await conn.add_listener("codes_changed", _listener)
+    print("[codes_changed] listener attached")
+
+    # Keep the connection alive forever
+    try:
+        while not bot.is_closed():
+            await asyncio.sleep(3600)
+    finally:
+        await conn.close()
 
 
 # ══════════════════════════════════════════════════════════════════════
