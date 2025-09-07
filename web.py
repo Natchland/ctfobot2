@@ -1,6 +1,6 @@
 import os, datetime, asyncpg, httpx
 from pathlib import Path
-from functools import wraps          # ← added
+import inspect
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
 from fastapi import (
@@ -44,16 +44,27 @@ async def startup():
         """)
 
 # ────────────────── Auth helpers ───────────────────────
-from functools import update_wrapper          # change: update_wrapper, not wraps
-
 async def current_user(request: Request):
-    ...  # unchanged
+    """Return username if a valid signed cookie is present and approved."""
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        return None
+    try:
+        username = signer.loads(token)
+    except BadSignature:
+        return None
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT username, approved FROM admins WHERE username=$1", username
+        )
     return row["username"] if row and row["approved"] else None
 
 def login_required(endpoint):
     """
-    Checks cookie, injects `user`, but hides that param from FastAPI
-    so it’s NOT treated as a query field.
+    Decorator that:
+      • checks the cookie
+      • injects `user` into the handler
+      • hides that argument from FastAPI by giving the wrapper its own signature
     """
     async def wrapper(request: Request, **path_params):
         user = await current_user(request)
@@ -61,8 +72,23 @@ def login_required(endpoint):
             return RedirectResponse("/login", status_code=303)
         return await endpoint(request, user, **path_params)
 
-    # copy name / docstring only – keep wrapper’s own signature
-    update_wrapper(wrapper, endpoint, updated=())
+    # ── make FastAPI see only (request, **path_params) ──
+    wrapper.__signature__ = inspect.Signature(
+        parameters=[
+            inspect.Parameter(
+                "request",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=Request,
+            ),
+            inspect.Parameter(
+                "path_params",
+                inspect.Parameter.VAR_KEYWORD,
+            ),
+        ]
+    )
+    # Copy metadata for debugging / docs
+    wrapper.__name__ = endpoint.__name__
+    wrapper.__doc__  = endpoint.__doc__
     return wrapper
 
 # ────────────────── Public page ────────────────────────
