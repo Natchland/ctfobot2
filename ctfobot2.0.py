@@ -1,17 +1,23 @@
-from __future__ import annotations
-import os, sys, json, asyncio, signal, discord
+import os
+import sys
+import asyncio
+import signal
+import discord
+import asyncpg
+import json
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone, date
-from typing import Dict, Set, Any
+from typing import Dict, Any
 from random import choice
 
 # ══ Configuration ═══════════════════════════
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GUILD_ID  = int(os.getenv("GUILD_ID", 1377035207777194005))
-FEEDBACK_CH    = 1413188006499586158
+DATABASE_URL = os.getenv("DATABASE_URL")
+GUILD_ID = int(os.getenv("GUILD_ID", "1377035207777194005"))
+FEEDBACK_CH = 1413188006499586158
 MEMBER_FORM_CH = 1413672763108888636
-WARNING_CH_ID  = 1398657081338237028
+WARNING_CH_ID = 1398657081338237028
 
 ACCEPT_ROLE_ID = 1377075930144571452
 REGION_ROLE_IDS = {
@@ -30,6 +36,7 @@ FOCUS_ROLE_IDS = {
 TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60
 GIVEAWAY_ROLE_ID     = 1403337937722019931
 GIVEAWAY_CH_ID       = 1413929735658016899
+CODES_CH_ID          = 1413929735658016899
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG       = "END:"
 FOOTER_PRIZE_TAG     = "PRIZE:"
@@ -37,21 +44,13 @@ PROMOTE_STREAK       = 3
 INACTIVE_AFTER_DAYS  = 5
 WARN_BEFORE_DAYS     = INACTIVE_AFTER_DAYS - 1
 
-# New codes roles
 ADMIN_ID = 1377103244089622719
 ELECTRICIAN_ID = 1380233234675400875
 GROUP_LEADER_ID = 1377077466513932338
 PLAYER_MGMT_ID = 1377084533706588201
 TRUSTED_ID = 1400584430900219935
 
-# Code names
 CODE_NAMES = ["Master", "Guest", "Electrician", "Other"]
-
-DATA_DIR = os.getenv("DATA_DIR", "/data")
-os.makedirs(DATA_DIR, exist_ok=True)
-REVIEW_FILE   = os.path.join(DATA_DIR, "reviewers.json")
-ACTIVITY_FILE = os.path.join(DATA_DIR, "activity.json")
-CODES_FILE    = os.path.join(DATA_DIR, "codes.json")
 
 # ══ Bot/intents ═════════════════════════════
 intents = discord.Intents.default()
@@ -59,265 +58,209 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot("!", intents=intents)
 
-bot.review_team = set()
 bot.last_anonymous_time = {}
 bot.giveaway_stop_events = {}
 
-# ══ NEW /CODES SYSTEM (SIMPLE) ══════════════
+# ══ Database helpers ════════════════════════
+class Database:
+    def __init__(self, dsn):
+        self.dsn = dsn
+        self.pool = None
 
-def load_codes() -> dict:
-    if os.path.isfile(CODES_FILE):
-        try:
-            with open(CODES_FILE, "r", encoding="utf8") as fp:
-                return json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            pass
-    return {}
+    async def connect(self):
+        self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
+        await self.init_tables()
 
-def save_codes(codes: dict):
-    try:
-        with open(CODES_FILE, "w", encoding="utf8") as fp:
-            json.dump(codes, fp)
-    except OSError:
-        pass
+    async def init_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS codes (
+                    name TEXT PRIMARY KEY,
+                    pin VARCHAR(4) NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS reviewers (
+                    user_id BIGINT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS activity (
+                    user_id BIGINT PRIMARY KEY,
+                    streak INTEGER,
+                    date DATE,
+                    warned BOOLEAN,
+                    last TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS giveaways (
+                    id SERIAL PRIMARY KEY,
+                    channel_id BIGINT,
+                    message_id BIGINT,
+                    prize TEXT,
+                    end_ts BIGINT,
+                    active BOOLEAN
+                );
+                CREATE TABLE IF NOT EXISTS member_forms (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    created_at TIMESTAMP DEFAULT now(),
+                    data JSONB
+                );
+            """)
 
-codes: dict = load_codes()
+    # Codes
+    async def get_codes(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT name, pin FROM codes ORDER BY name")
+            return {r['name']: r['pin'] for r in rows}
 
-def is_admin_or_lead(member: discord.Member) -> bool:
-    ids = {ADMIN_ID, GROUP_LEADER_ID, PLAYER_MGMT_ID}
-    return any(r.id in ids for r in member.roles)
+    async def add_code(self, name, pin):
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO codes (name, pin) VALUES ($1, $2)", name, pin)
 
-def can_view_code(member: discord.Member, code_name: str) -> bool:
-    role_ids = {r.id for r in member.roles}
-    if any(r in role_ids for r in [ADMIN_ID, GROUP_LEADER_ID, PLAYER_MGMT_ID]):
-        return True
-    if code_name == "Guest" and (TRUSTED_ID in role_ids or ELECTRICIAN_ID in role_ids):
-        return True
-    if code_name == "Electrician" and (ELECTRICIAN_ID in role_ids):
-        return True
-    return False
+    async def edit_code(self, name, pin):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE codes SET pin=$2 WHERE name=$1", name, pin)
 
-def get_visible_codes(member: discord.Member):
-    return [name for name in CODE_NAMES if can_view_code(member, name)]
+    async def remove_code(self, name):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM codes WHERE name=$1", name)
 
-class CodesMenuView(discord.ui.View):
-    def __init__(self, member: discord.Member):
-        super().__init__(timeout=120)
-        self.member = member
-        self.codes_to_show = get_visible_codes(member)
-        for code_name in self.codes_to_show:
-            self.add_item(ViewCodeButton(code_name))
-        if is_admin_or_lead(member):
-            self.add_item(UpdateCodeButton())
+    # Reviewers
+    async def get_reviewers(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM reviewers")
+            return set(r['user_id'] for r in rows)
 
-class ViewCodeButton(discord.ui.Button):
-    def __init__(self, code_name):
-        super().__init__(label=f"Show {code_name} Code", style=discord.ButtonStyle.primary)
-        self.code_name = code_name
+    async def add_reviewer(self, user_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
 
-    async def callback(self, interaction: discord.Interaction):
-        val = codes.get(self.code_name, "*Not Set*")
-        await interaction.response.send_message(f"**{self.code_name} Code:** `{val}`", ephemeral=True)
+    async def remove_reviewer(self, user_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM reviewers WHERE user_id=$1", user_id)
 
-class UpdateCodeButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Update Code", style=discord.ButtonStyle.success)
+    # Activity
+    async def get_activity(self, user_id):
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM activity WHERE user_id=$1", user_id)
+            return dict(row) if row else None
 
-    async def callback(self, interaction: discord.Interaction):
-        options = [discord.SelectOption(label=name, value=name) for name in CODE_NAMES]
-        select = discord.ui.Select(
-            placeholder="Select code to update",
-            options=options,
-            min_values=1, max_values=1,
-        )
+    async def set_activity(self, user_id, streak, date, warned, last):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO activity (user_id, streak, date, warned, last)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (user_id)
+                DO UPDATE SET streak=$2, date=$3, warned=$4, last=$5
+            """, user_id, streak, date, warned, last)
 
-        async def select_callback(inter):
-            await inter.response.send_modal(UpdateCodeModal(select.values[0]))
+    async def get_all_activity(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM activity")
+            return {r['user_id']: dict(r) for r in rows}
 
-        select.callback = select_callback
-        view = discord.ui.View()
-        view.add_item(select)
-        await interaction.response.send_message("Which code do you want to update?", view=view, ephemeral=True)
+    # Giveaways
+    async def add_giveaway(self, channel_id, message_id, prize, end_ts):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO giveaways (channel_id, message_id, prize, end_ts, active)
+                VALUES ($1, $2, $3, $4, TRUE)
+            """, channel_id, message_id, prize, end_ts)
 
-class UpdateCodeModal(discord.ui.Modal, title="Update Code"):
-    code_value = discord.ui.TextInput(label="New Code Value", required=True)
+    async def end_giveaway(self, message_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE giveaways SET active=FALSE WHERE message_id=$1", message_id)
 
-    def __init__(self, code_name):
-        super().__init__()
-        self.code_name = code_name
+    async def get_active_giveaways(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM giveaways WHERE active=TRUE")
+            return [dict(r) for r in rows]
 
-    async def on_submit(self, interaction: discord.Interaction):
-        codes[self.code_name] = self.code_value.value
-        save_codes(codes)
-        await interaction.response.send_message(
-            f"Code for **{self.code_name}** updated.", ephemeral=True
-        )
+    # Member forms
+    async def add_member_form(self, user_id, data):
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO member_forms (user_id, data) VALUES ($1, $2)", user_id, json.dumps(data))
 
-@bot.tree.command(name="codes", description="View or update codes")
-async def codes_command(inter: discord.Interaction):
-    await inter.response.send_message(
-        "Code menu:",
-        view=CodesMenuView(inter.user),
-        ephemeral=True
+    async def get_member_forms(self, user_id=None):
+        async with self.pool.acquire() as conn:
+            if user_id:
+                rows = await conn.fetch("SELECT * FROM member_forms WHERE user_id=$1", user_id)
+            else:
+                rows = await conn.fetch("SELECT * FROM member_forms")
+            return [dict(r) for r in rows]
+
+db = Database(DATABASE_URL)
+
+# ══ Codes Embed Utilities ═══════════════════
+def build_codes_embed(codes: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="🔑 Access Codes",
+        description="Below are the current access codes. Contact an admin if you need access.",
+        color=discord.Color.blue(),
     )
+    if codes:
+        for name, pin in codes.items():
+            embed.add_field(name=name, value=f"`{pin}`", inline=False)
+    else:
+        embed.description += "\n\n*No codes set yet.*"
+    embed.set_footer(text="Code list is kept up to date by staff.")
+    return embed
 
-# ══ Reviewer List helpers ═══════════════════
-def load_reviewers() -> None:
-    if os.path.isfile(REVIEW_FILE):
-        try:
-            with open(REVIEW_FILE, "r", encoding="utf8") as fp:
-                bot.review_team |= {int(x) for x in json.load(fp)}
-        except (OSError, json.JSONDecodeError):
-            pass
-
-def save_reviewers() -> None:
-    try:
-        with open(REVIEW_FILE, "w", encoding="utf8") as fp:
-            json.dump(list(bot.review_team), fp)
-    except OSError:
-        pass
-
-load_reviewers()
-
-activity: Dict[str, Dict[str, Any]] = {}
-
-def load_activity() -> None:
-    global activity
-    if os.path.isfile(ACTIVITY_FILE):
-        try:
-            with open(ACTIVITY_FILE, "r", encoding="utf8") as fp:
-                activity = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            activity = {}
-
-def save_activity() -> None:
-    try:
-        with open(ACTIVITY_FILE, "w", encoding="utf8") as fp:
-            json.dump(activity, fp)
-    except OSError:
-        pass
-
-load_activity()
-
-def _dump_all() -> None:
-    save_reviewers()
-    save_activity()
-    save_codes(codes)
-
-def _graceful_exit() -> None:
-    print("Signal received – saving JSON files and shutting down …")
-    try:
-        _dump_all()
-    finally:
-        sys.exit(0)
-
-async def _periodic_autosave() -> None:
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        await asyncio.sleep(60)
-        _dump_all()
-
-def mark_active(member: discord.Member) -> None:
-    if member.bot:
+async def update_codes_message(bot, codes: dict):
+    channel = bot.get_channel(CODES_CH_ID)
+    if not channel:
+        print("Codes channel missing!")
         return
 
-    today = date.today().isoformat()
-    rec = activity.setdefault(
-        str(member.id), {"streak": 0, "date": today, "warned": False}
-    )
-
-    if rec["date"] != today:
-        yesterday = date.fromisoformat(rec["date"]) + timedelta(days=1)
-        rec["streak"] = rec["streak"] + 1 if yesterday.isoformat() == today else 1
-        rec["date"] = today
-        rec["warned"] = False
-
-    rec["last"] = datetime.now(timezone.utc).timestamp()
-    save_activity()
-
-    role = member.guild.get_role(GIVEAWAY_ROLE_ID)
-    if role and rec["streak"] >= PROMOTE_STREAK and role not in member.roles:
-        asyncio.create_task(
-            member.add_roles(role, reason=f"{PROMOTE_STREAK}-day activity streak")
-        )
-
-def _cutoff(days: int) -> float:
-    return datetime.now(timezone.utc).timestamp() - days * 86400
-
-def members_to_warn(guild: discord.Guild):
-    warn_cut = _cutoff(WARN_BEFORE_DAYS)
-    kick_cut = _cutoff(INACTIVE_AFTER_DAYS)
-    role = guild.get_role(GIVEAWAY_ROLE_ID)
-    if not role:
-        return []
-
-    out = []
-    for m in role.members:
-        info = activity.get(str(m.id), {})
-        last = float(info.get("last", 0))
-        if last < warn_cut <= last or info.get("warned"):
-            continue
-        if last < warn_cut and last >= kick_cut:
-            out.append(m)
-    return out
-
-def members_to_demote(guild: discord.Guild):
-    kick_cut = _cutoff(INACTIVE_AFTER_DAYS)
-    role = guild.get_role(GIVEAWAY_ROLE_ID)
-    if not role:
-        return []
-    return [
-        m
-        for m in role.members
-        if float(activity.get(str(m.id), {}).get("last", 0)) < kick_cut
-    ]
-
-async def daily_activity_check():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        now = datetime.now(timezone.utc)
-        nxt = (now + timedelta(days=1)).replace(
-            hour=4, minute=0, second=0, microsecond=0
-        )
-        await asyncio.sleep((nxt - now).total_seconds())
-
-        guild = bot.get_guild(GUILD_ID)
-        if not guild:
-            continue
-
-        warn_ch = guild.get_channel(WARNING_CH_ID)
-        role = guild.get_role(GIVEAWAY_ROLE_ID)
-
-        for m in members_to_warn(guild):
-            if warn_ch:
-                try:
-                    await warn_ch.send(
-                        f"{m.mention} you have been inactive **{WARN_BEFORE_DAYS} days**. "
-                        f"You will lose {role.mention} tomorrow."
-                    )
-                except discord.HTTPException:
-                    pass
-            activity[str(m.id)]["warned"] = True
-
-        removed = 0
-        for m in members_to_demote(guild):
+    msg_id_file = "codes_msg_id.txt"
+    msg_id = None
+    if os.path.isfile(msg_id_file):
+        with open(msg_id_file, "r") as f:
             try:
-                await m.remove_roles(role, reason="inactive 5 days")
-                removed += 1
-            except discord.Forbidden:
+                msg_id = int(f.read().strip())
+            except Exception:
                 pass
 
-        if removed and warn_ch:
-            await warn_ch.send(
-                f"Removed {role.mention} from **{removed}** inactive member(s)."
-            )
+    embed = build_codes_embed(codes)
+    if msg_id:
+        try:
+            msg = await channel.fetch_message(msg_id)
+            await msg.edit(embed=embed)
+            return
+        except Exception:
+            pass
 
-        save_activity()
+    msg = await channel.send(embed=embed)
+    with open(msg_id_file, "w") as f:
+        f.write(str(msg.id))
+
+# ══ Reviewer List helpers (DB-backed) ══════
+async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
+    reviewers = await db.get_reviewers()
+    return inter.user.guild_permissions.administrator or inter.user.id in reviewers
+
+# ══ Activity Helper (DB-backed) ════════════
+async def mark_active(member: discord.Member):
+    if member.bot:
+        return
+    today = date.today()
+    rec = await db.get_activity(member.id)
+    if not rec:
+        streak = 1
+        warned = False
+    else:
+        if rec['date'] != today:
+            lastdate = rec['date']
+            yesterday = lastdate + timedelta(days=1)
+            streak = rec['streak'] + 1 if yesterday == today else 1
+            warned = False
+        else:
+            streak = rec['streak']
+            warned = rec['warned']
+    last = datetime.now(timezone.utc)
+    await db.set_activity(member.id, streak, today, warned, last)
 
 @bot.event
 async def on_message(msg: discord.Message):
     if msg.guild and not msg.author.bot:
-        mark_active(msg.author)
+        await mark_active(msg.author)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -327,200 +270,101 @@ async def on_voice_state_update(member, before, after):
         and not before.channel
         and after.channel
     ):
-        mark_active(member)
+        await mark_active(member)
 
-# ========== GIVEAWAYS ==========
+# ========== /codes command group ==========
+class CodesCog(commands.Cog):
+    def __init__(self, bot, db):
+        self.bot = bot
+        self.db = db
 
-def fmt_time(s: int) -> str:
-    d, s = divmod(s, 86400)
-    h, s = divmod(s, 3600)
-    m, s = divmod(s, 60)
-    return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m {s}s" if m else f"{s}s"
+    codes_group = app_commands.Group(name="codes", description="Manage access codes")
 
-def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False):
-    if idx < len(e.fields):
-        e.set_field_at(idx, name=name, value=value, inline=inline)
-    else:
-        while len(e.fields) < idx:
-            e.add_field(name="\u200b", value="\u200b", inline=False)
-        e.add_field(name=name, value=value, inline=inline)
+    @codes_group.command(name="list", description="Show the current access codes")
+    async def codes_list(self, inter: discord.Interaction):
+        codes = await self.db.get_codes()
+        embed = build_codes_embed(codes)
+        await inter.response.send_message(embed=embed, ephemeral=True)
 
-def eligible(g: discord.Guild):
-    r = g.get_role(GIVEAWAY_ROLE_ID)
-    return [m for m in r.members if not m.bot] if r else []
+    @codes_group.command(name="add", description="Add a new code")
+    @app_commands.describe(name="Name of the code", pin="4-digit code (e.g. 1234)")
+    async def codes_add(self, inter: discord.Interaction, name: str, pin: str):
+        if not await is_admin_or_reviewer(inter):
+            await inter.response.send_message("You need admin permission.", ephemeral=True)
+            return
 
-class GiveawayControl(discord.ui.View):
-    def __init__(self, g, ch_id, msg_id, prize, stop):
-        super().__init__(timeout=None)
-        self.g, self.ch, self.msg_id, self.prize, self.stop = (
-            g,
-            ch_id,
-            msg_id,
-            prize,
-            stop,
-        )
+        codes = await self.db.get_codes()
+        if name in codes:
+            await inter.response.send_message("A code with that name already exists.", ephemeral=True)
+            return
+        if not (pin.isdigit() and len(pin) == 4):
+            await inter.response.send_message("PIN must be a 4-digit number.", ephemeral=True)
+            return
+        await self.db.add_code(name, pin)
+        codes = await self.db.get_codes()
+        await update_codes_message(self.bot, codes)
+        await inter.response.send_message(f"Added code `{name}: {pin}`.", ephemeral=True)
 
-    def _admin(self, m):
-        return m.guild_permissions.administrator or m.id == bot.owner_id
+    @codes_group.command(name="edit", description="Edit the PIN for an existing code")
+    @app_commands.describe(name="Name of the code", pin="New 4-digit code")
+    async def codes_edit(self, inter: discord.Interaction, name: str, pin: str):
+        if not await is_admin_or_reviewer(inter):
+            await inter.response.send_message("You need admin permission.", ephemeral=True)
+            return
+        codes = await self.db.get_codes()
+        if name not in codes:
+            await inter.response.send_message("No such code.", ephemeral=True)
+            return
+        if not (pin.isdigit() and len(pin) == 4):
+            await inter.response.send_message("PIN must be a 4-digit number.", ephemeral=True)
+            return
+        await self.db.edit_code(name, pin)
+        codes = await self.db.get_codes()
+        await update_codes_message(self.bot, codes)
+        await inter.response.send_message(f"Updated code `{name}: {pin}`.", ephemeral=True)
 
-    @discord.ui.button(
-        label="End & Draw", style=discord.ButtonStyle.success, emoji="🎰", custom_id="gw_end"
-    )
-    async def end(self, inter: discord.Interaction, _):
-        if not self._admin(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
+    @codes_group.command(name="remove", description="Remove a code")
+    @app_commands.describe(name="Name of the code to remove")
+    async def codes_remove(self, inter: discord.Interaction, name: str):
+        if not await is_admin_or_reviewer(inter):
+            await inter.response.send_message("You need admin permission.", ephemeral=True)
+            return
+        codes = await self.db.get_codes()
+        if name not in codes:
+            await inter.response.send_message("No such code.", ephemeral=True)
+            return
+        await self.db.remove_code(name)
+        codes = await self.db.get_codes()
+        await update_codes_message(self.bot, codes)
+        await inter.response.send_message(f"Removed code `{name}`.", ephemeral=True)
 
-        chan = self.g.get_channel(self.ch)
-        msg = await chan.fetch_message(self.msg_id)
-        win = choice(eligible(self.g)) if eligible(self.g) else None
+codes_cog = CodesCog(bot, db)
+bot.tree.add_command(codes_cog.codes_group)
 
-        if win:
-            await chan.send(
-                embed=discord.Embed(
-                    title=f"🎉 {self.prize} – WINNER 🎉",
-                    description=f"Congrats {win.mention}! Enjoy **{self.prize}**!",
-                    colour=discord.Color.gold(),
-                )
-            )
-        else:
-            await chan.send("No eligible entrants.")
-
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value="**ENDED**")
-        put_field(e, 3, name="Eligible Entrants", value="Giveaway ended early.")
-        e.color = discord.Color.dark_gray()
-        await msg.edit(embed=e, view=None)
-        self.stop.set()
-        await inter.response.send_message("Ended.", ephemeral=True)
-
-    @discord.ui.button(
-        label="Cancel", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="gw_cancel"
-    )
-    async def cancel(self, inter: discord.Interaction, _):
-        if not self._admin(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
-
-        chan = self.g.get_channel(self.ch)
-        msg = await chan.fetch_message(self.msg_id)
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value="**CANCELLED**")
-        put_field(e, 3, name="Eligible Entrants", value="Giveaway cancelled.")
-        e.color = discord.Color.red()
-        await msg.edit(embed=e, view=None)
-        self.stop.set()
-        await chan.send("Giveaway cancelled.")
-        await inter.response.send_message("Cancelled.", ephemeral=True)
-
-async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
-    chan = g.get_channel(ch_id)
-    msg = await chan.fetch_message(msg_id)
-
-    while not stop.is_set():
-        rem = end_ts - int(datetime.now(timezone.utc).timestamp())
-        if rem <= 0:
-            break
-
-        txt = "\n".join(m.mention for m in eligible(g)) or "*None yet*"
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value=f"**{fmt_time(rem)}**")
-        put_field(e, 3, name="Eligible Entrants", value=txt)
-        try:
-            await msg.edit(embed=e)
-        except discord.HTTPException:
-            pass
-
-        await asyncio.sleep(min(60, rem))
-
-    if stop.is_set():
+# Reviewer commands
+@bot.tree.command(name="addreviewer")
+async def add_reviewer(i: discord.Interaction, member: discord.Member):
+    if not i.user.guild_permissions.administrator:
+        await i.response.send_message("No permission.", ephemeral=True)
         return
+    await db.add_reviewer(member.id)
+    await i.response.send_message("Added.", ephemeral=True)
 
-    pool = eligible(g)
-    if pool:
-        await chan.send(
-            embed=discord.Embed(
-                title=f"🎉 {prize} – WINNER 🎉",
-                description=f"Congratulations {choice(pool).mention}! You won **{prize}**!",
-                colour=discord.Color.gold(),
-            )
-        )
-    else:
-        await chan.send("No eligible entrants.")
-
-async def resume_giveaways():
-    g = bot.get_guild(GUILD_ID)
-    ch = g.get_channel(GIVEAWAY_CH_ID) if g else None
-    if not g or not ch:
+@bot.tree.command(name="removereviewer")
+async def remove_reviewer(i: discord.Interaction, member: discord.Member):
+    if not i.user.guild_permissions.administrator:
+        await i.response.send_message("No permission.", ephemeral=True)
         return
+    await db.remove_reviewer(member.id)
+    await i.response.send_message("Removed.", ephemeral=True)
 
-    async for msg in ch.history(limit=200):
-        if msg.author.id != bot.user.id or not msg.embeds:
-            continue
-        e = msg.embeds[0]
-        if e.title != EMBED_TITLE or not e.footer:
-            continue
-        f = e.footer.text.strip("|")
-        if FOOTER_END_TAG not in f:
-            continue
-        end_ts = int(f.split("|", 1)[0].replace(FOOTER_END_TAG, ""))
-        prize = f.split("|", 1)[1].replace(FOOTER_PRIZE_TAG, "")
-        if end_ts <= int(datetime.now(timezone.utc).timestamp()):
-            continue
-        stop = asyncio.Event()
-        bot.giveaway_stop_events[msg.id] = stop
-        v = GiveawayControl(g, ch.id, msg.id, prize, stop)
-        bot.add_view(v, message_id=msg.id)
-        asyncio.create_task(run_giveaway(g, ch.id, msg.id, prize, end_ts, stop))
+@bot.tree.command(name="reviewers")
+async def list_reviewers(i: discord.Interaction):
+    reviewers = await db.get_reviewers()
+    txt = ", ".join(f"<@{u}>" for u in reviewers) or "None."
+    await i.response.send_message(txt, ephemeral=True)
 
-@bot.tree.command(name="giveaway", description="Start a giveaway")
-@app_commands.check(lambda i: i.user.guild_permissions.administrator)
-@app_commands.choices(
-    duration=[
-        app_commands.Choice(name="7 days", value=7),
-        app_commands.Choice(name="14 days", value=14),
-        app_commands.Choice(name="30 days", value=30),
-    ]
-)
-@app_commands.describe(prize="Prize to give away")
-async def giveaway(
-    inter: discord.Interaction, duration: app_commands.Choice[int], prize: str
-):
-    g = inter.guild
-    ch = g.get_channel(GIVEAWAY_CH_ID)
-    role = g.get_role(GIVEAWAY_ROLE_ID)
-
-    if not ch or not role:
-        return await inter.response.send_message(
-            "Giveaway channel/role missing.", ephemeral=True
-        )
-
-    end_ts = int(datetime.now(timezone.utc).timestamp()) + duration.value * 86400
-    stop = asyncio.Event()
-    embed = discord.Embed(title=EMBED_TITLE, colour=discord.Color.blurple())
-    embed.add_field(name="Prize", value=f"**{prize}**", inline=False)
-    embed.add_field(name="Time left", value=f"**{duration.name}**", inline=False)
-    embed.add_field(
-        name="Eligibility", value=f"Only {role.mention} can win.", inline=False
-    )
-    embed.add_field(name="Eligible Entrants", value="*Updating…*", inline=False)
-    embed.set_footer(
-        text=f"||{FOOTER_END_TAG}{end_ts}|{FOOTER_PRIZE_TAG}{prize}||"
-    )
-
-    v = GiveawayControl(g, ch.id, 0, prize, stop)
-    msg = await ch.send(embed=embed, view=v)
-    v.msg_id = v.message_id = msg.id
-    bot.add_view(v, message_id=msg.id)
-    asyncio.create_task(run_giveaway(g, ch.id, msg.id, prize, end_ts, stop))
-    await inter.response.send_message(
-        f"Giveaway started in {ch.mention}.", ephemeral=True
-    )
-
-# ========== FEEDBACK ==========
-
+# ========== Feedback command ==========
 @bot.tree.command(name="feedback")
 @app_commands.describe(message="Your feedback", anonymous="Send anonymously?")
 async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
@@ -558,31 +402,6 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
 
     await ch.send(embed=embed)
     await inter.response.send_message("Thanks!", ephemeral=True)
-
-# ========== REVIEWER COMMANDS ==========
-
-def is_admin(i: discord.Interaction) -> bool:
-    return i.user.guild_permissions.administrator or i.user.id == bot.owner_id
-
-@bot.tree.command(name="addreviewer")
-@app_commands.check(is_admin)
-async def add_reviewer(i: discord.Interaction, member: discord.Member):
-    bot.review_team.add(member.id)
-    save_reviewers()
-    await i.response.send_message("Added.", ephemeral=True)
-
-@bot.tree.command(name="removereviewer")
-@app_commands.check(is_admin)
-async def remove_reviewer(i: discord.Interaction, member: discord.Member):
-    bot.review_team.discard(member.id)
-    save_reviewers()
-    await i.response.send_message("Removed.", ephemeral=True)
-
-@bot.tree.command(name="reviewers")
-@app_commands.check(is_admin)
-async def list_reviewers(i: discord.Interaction):
-    txt = ", ".join(f"<@{u}>" for u in bot.review_team) or "None."
-    await i.response.send_message(txt, ephemeral=True)
 
 # ========== REGISTRATION WORKFLOW ==========
 
@@ -699,12 +518,17 @@ class ActionView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild, self.uid, self.region, self.focus = guild, uid, region, focus
 
+    @property
+    def reviewers(self):
+        return bot.loop.create_task(db.get_reviewers())
+
     def authorised(self, u, perm):
-        return u.id in bot.review_team or getattr(u.guild_permissions, perm)
+        return u.id in bot.loop.run_until_complete(db.get_reviewers()) or getattr(u.guild_permissions, perm)
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
     async def accept(self, inter, _):
-        if not self.authorised(inter.user, "manage_roles"):
+        reviewers = await db.get_reviewers()
+        if not (inter.user.id in reviewers or inter.user.guild_permissions.manage_roles):
             return await inter.response.send_message("Not authorised.", ephemeral=True)
 
         member = await safe_fetch(self.guild, self.uid)
@@ -736,7 +560,8 @@ class ActionView(discord.ui.View):
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔")
     async def deny(self, inter, _):
-        if not self.authorised(inter.user, "ban_members"):
+        reviewers = await db.get_reviewers()
+        if not (inter.user.id in reviewers or inter.user.guild_permissions.ban_members):
             return await inter.response.send_message("Not authorised.", ephemeral=True)
 
         member = await safe_fetch(self.guild, self.uid)
@@ -866,6 +691,21 @@ class FinalRegistrationModal(discord.ui.Modal):
             )
         e.add_field(name="\u200b", value="\u200b", inline=False)
 
+        # Save to persistent member_forms table
+        await db.add_member_form(user.id, {
+            "age": d["age"],
+            "region": d["region"],
+            "bans": d["bans"],
+            "ban_explanation": self.ban_expl.value if self.ban_expl else None,
+            "focus": d["focus"],
+            "skill": d["skill"],
+            "steam": self.steam.value,
+            "hours": self.hours.value,
+            "heard": self.heard.value,
+            "referral": self.referral.value if self.referral else None,
+            "gender": self.gender.value if self.gender else None
+        })
+
         await inter.client.get_channel(MEMBER_FORM_CH).send(
             embed=e,
             view=ActionView(inter.guild, user.id, d["region"], d["focus"]),
@@ -892,26 +732,197 @@ async def memberform(inter: discord.Interaction):
         "Click below to begin registration:", view=MemberRegistrationView(), ephemeral=True
     )
 
+# ========== GIVEAWAYS ==========
+
+def fmt_time(s: int) -> str:
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m {s}s" if m else f"{s}s"
+
+def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False):
+    if idx < len(e.fields):
+        e.set_field_at(idx, name=name, value=value, inline=inline)
+    else:
+        while len(e.fields) < idx:
+            e.add_field(name="\u200b", value="\u200b", inline=False)
+        e.add_field(name=name, value=value, inline=inline)
+
+def eligible(g: discord.Guild):
+    r = g.get_role(GIVEAWAY_ROLE_ID)
+    return [m for m in r.members if not m.bot] if r else []
+
+class GiveawayControl(discord.ui.View):
+    def __init__(self, g, ch_id, msg_id, prize, stop):
+        super().__init__(timeout=None)
+        self.g, self.ch, self.msg_id, self.prize, self.stop = (
+            g,
+            ch_id,
+            msg_id,
+            prize,
+            stop,
+        )
+
+    def _admin(self, m):
+        return m.guild_permissions.administrator or m.id == bot.owner_id
+
+    @discord.ui.button(
+        label="End & Draw", style=discord.ButtonStyle.success, emoji="🎰", custom_id="gw_end"
+    )
+    async def end(self, inter: discord.Interaction, _):
+        if not self._admin(inter.user):
+            return await inter.response.send_message(
+                "Not authorised.", ephemeral=True
+            )
+
+        chan = self.g.get_channel(self.ch)
+        msg = await chan.fetch_message(self.msg_id)
+        win = choice(eligible(self.g)) if eligible(self.g) else None
+
+        if win:
+            await chan.send(
+                embed=discord.Embed(
+                    title=f"🎉 {self.prize} – WINNER 🎉",
+                    description=f"Congrats {win.mention}! Enjoy **{self.prize}**!",
+                    colour=discord.Color.gold(),
+                )
+            )
+        else:
+            await chan.send("No eligible entrants.")
+
+        e = msg.embeds[0]
+        put_field(e, 1, name="Time left", value="**ENDED**")
+        put_field(e, 3, name="Eligible Entrants", value="Giveaway ended early.")
+        e.color = discord.Color.dark_gray()
+        await msg.edit(embed=e, view=None)
+        self.stop.set()
+        await inter.response.send_message("Ended.", ephemeral=True)
+        await db.end_giveaway(self.msg_id)
+
+    @discord.ui.button(
+        label="Cancel", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="gw_cancel"
+    )
+    async def cancel(self, inter: discord.Interaction, _):
+        if not self._admin(inter.user):
+            return await inter.response.send_message(
+                "Not authorised.", ephemeral=True
+            )
+
+        chan = self.g.get_channel(self.ch)
+        msg = await chan.fetch_message(self.msg_id)
+        e = msg.embeds[0]
+        put_field(e, 1, name="Time left", value="**CANCELLED**")
+        put_field(e, 3, name="Eligible Entrants", value="Giveaway cancelled.")
+        e.color = discord.Color.red()
+        await msg.edit(embed=e, view=None)
+        self.stop.set()
+        await chan.send("Giveaway cancelled.")
+        await inter.response.send_message("Cancelled.", ephemeral=True)
+        await db.end_giveaway(self.msg_id)
+
+async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
+    chan = g.get_channel(ch_id)
+    msg = await chan.fetch_message(msg_id)
+
+    while not stop.is_set():
+        rem = end_ts - int(datetime.now(timezone.utc).timestamp())
+        if rem <= 0:
+            break
+
+        txt = "\n".join(m.mention for m in eligible(g)) or "*None yet*"
+        e = msg.embeds[0]
+        put_field(e, 1, name="Time left", value=f"**{fmt_time(rem)}**")
+        put_field(e, 3, name="Eligible Entrants", value=txt)
+        try:
+            await msg.edit(embed=e)
+        except discord.HTTPException:
+            pass
+
+        await asyncio.sleep(min(60, rem))
+
+    if stop.is_set():
+        return
+
+    pool = eligible(g)
+    if pool:
+        await chan.send(
+            embed=discord.Embed(
+                title=f"🎉 {prize} – WINNER 🎉",
+                description=f"Congratulations {choice(pool).mention}! You won **{prize}**!",
+                colour=discord.Color.gold(),
+            )
+        )
+    else:
+        await chan.send("No eligible entrants.")
+    await db.end_giveaway(msg_id)
+
+async def resume_giveaways():
+    g = bot.get_guild(GUILD_ID)
+    ch = g.get_channel(GIVEAWAY_CH_ID) if g else None
+    if not g or not ch:
+        return
+
+    # Start from DB
+    for row in await db.get_active_giveaways():
+        stop = asyncio.Event()
+        bot.giveaway_stop_events[row['message_id']] = stop
+        v = GiveawayControl(g, row['channel_id'], row['message_id'], row['prize'], stop)
+        bot.add_view(v, message_id=row['message_id'])
+        asyncio.create_task(run_giveaway(
+            g, row['channel_id'], row['message_id'], row['prize'], row['end_ts'], stop
+        ))
+
+@bot.tree.command(name="giveaway", description="Start a giveaway")
+@app_commands.check(lambda i: i.user.guild_permissions.administrator)
+@app_commands.choices(
+    duration=[
+        app_commands.Choice(name="7 days", value=7),
+        app_commands.Choice(name="14 days", value=14),
+        app_commands.Choice(name="30 days", value=30),
+    ]
+)
+@app_commands.describe(prize="Prize to give away")
+async def giveaway(
+    inter: discord.Interaction, duration: app_commands.Choice[int], prize: str
+):
+    g = inter.guild
+    ch = g.get_channel(GIVEAWAY_CH_ID)
+    role = g.get_role(GIVEAWAY_ROLE_ID)
+
+    if not ch or not role:
+        return await inter.response.send_message(
+            "Giveaway channel/role missing.", ephemeral=True
+        )
+
+    end_ts = int(datetime.now(timezone.utc).timestamp()) + duration.value * 86400
+    stop = asyncio.Event()
+    embed = discord.Embed(title=EMBED_TITLE, colour=discord.Color.blurple())
+    embed.add_field(name="Prize", value=f"**{prize}**", inline=False)
+    embed.add_field(name="Time left", value=f"**{duration.name}**", inline=False)
+    embed.add_field(
+        name="Eligibility", value=f"Only {role.mention} can win.", inline=False
+    )
+    embed.add_field(name="Eligible Entrants", value="*Updating…*", inline=False)
+    embed.set_footer(
+        text=f"||{FOOTER_END_TAG}{end_ts}|{FOOTER_PRIZE_TAG}{prize}||"
+    )
+
+    v = GiveawayControl(g, ch.id, 0, prize, stop)
+    msg = await ch.send(embed=embed, view=v)
+    v.msg_id = v.message_id = msg.id
+    bot.add_view(v, message_id=msg.id)
+    await db.add_giveaway(ch.id, msg.id, prize, end_ts)
+    asyncio.create_task(run_giveaway(g, ch.id, msg.id, prize, end_ts, stop))
+    await inter.response.send_message(
+        f"Giveaway started in {ch.mention}.", ephemeral=True
+    )
+
+# ========== on_ready and Signal Handlers ==========
+
 @bot.event
 async def on_ready():
+    await db.connect()
     print(f"Logged in as {bot.user} ({bot.user.id})")
-
-    # daily activity checker
-    if not getattr(bot, "_activity_task_started", False):
-        asyncio.create_task(daily_activity_check())
-        bot._activity_task_started = True
-
-    # autosave task
-    if not getattr(bot, "_autosave_started", False):
-        bot.loop.create_task(_periodic_autosave())
-        bot._autosave_started = True
-
-    # register signal handlers (loop is running now)
-    for _sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            bot.loop.add_signal_handler(_sig, _graceful_exit)
-        except (NotImplementedError, RuntimeError):
-            signal.signal(_sig, lambda *_: _graceful_exit())
 
     # slash-command sync
     guild_obj = discord.Object(id=GUILD_ID)
@@ -919,10 +930,13 @@ async def on_ready():
     await bot.tree.sync(guild=guild_obj)
     print("Slash-commands synced")
 
+    codes = await db.get_codes()
+    await update_codes_message(bot, codes)
+
     await resume_giveaways()
     print("Giveaways resumed")
 
-if not BOT_TOKEN:
-    raise RuntimeError("Set BOT_TOKEN environment variable!")
+if not BOT_TOKEN or not DATABASE_URL:
+    raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
 
 bot.run(BOT_TOKEN)
