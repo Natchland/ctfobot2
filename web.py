@@ -1,6 +1,5 @@
-import os, datetime, asyncpg, httpx
+import os, datetime, asyncpg, httpx, inspect
 from pathlib import Path
-import inspect
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
 from fastapi import (
@@ -12,8 +11,8 @@ from fastapi.templating import Jinja2Templates
 
 # ─────────────────────── Config ───────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")     # set on Railway
-OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")    # set on Railway
+WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")   # set in Railway
+OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")  # set in Railway
 COOKIE_NAME  = "ctfo_admin"
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -42,10 +41,17 @@ async def startup():
             approved BOOLEAN NOT NULL DEFAULT FALSE
         );
         """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS codes (
+            name TEXT PRIMARY KEY,
+            pin TEXT NOT NULL,
+            public BOOLEAN NOT NULL DEFAULT FALSE
+        );
+        """)
 
 # ────────────────── Auth helpers ───────────────────────
 async def current_user(request: Request):
-    """Return username if a valid signed cookie is present and approved."""
+    """Return username if a valid signed cookie exists and user is approved."""
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         return None
@@ -53,40 +59,37 @@ async def current_user(request: Request):
         username = signer.loads(token)
     except BadSignature:
         return None
+
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT username, approved FROM admins WHERE username=$1", username
         )
     return row["username"] if row and row["approved"] else None
 
+
 def login_required(endpoint):
     """
-    Decorator that:
-      • checks the cookie
-      • injects `user` into the handler
-      • hides that argument from FastAPI by giving the wrapper its own signature
+    Decorator that
+      • checks the signed cookie
+      • injects `user` into the real handler
+      • hides that extra parameter from FastAPI by exposing only `request`
     """
-    async def wrapper(request: Request, **path_params):
+    async def wrapper(request: Request, *args, **kwargs):
         user = await current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=303)
-        return await endpoint(request, user, **path_params)
+        return await endpoint(request, user, *args, **kwargs)
 
-    # ── make FastAPI see only (request, **path_params) ──
+    # FastAPI inspects __signature__; expose only (request)
     wrapper.__signature__ = inspect.Signature(
         parameters=[
             inspect.Parameter(
                 "request",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 annotation=Request,
-            ),
-            inspect.Parameter(
-                "path_params",
-                inspect.Parameter.VAR_KEYWORD,
-            ),
+            )
         ]
     )
-    # Copy metadata for debugging / docs
     wrapper.__name__ = endpoint.__name__
     wrapper.__doc__  = endpoint.__doc__
     return wrapper
@@ -94,13 +97,14 @@ def login_required(endpoint):
 # ────────────────── Public page ────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def welcome(request: Request):
-    guild_id      = os.getenv("GUILD_ID")
-    member_count  = "?"
+    guild_id     = os.getenv("GUILD_ID")
+    member_count = "?"
     if guild_id:
         try:
             async with httpx.AsyncClient() as cli:
                 r = await cli.get(
-                    f"https://discord.com/api/guilds/{guild_id}/widget.json", timeout=5
+                    f"https://discord.com/api/guilds/{guild_id}/widget.json",
+                    timeout=5
                 )
                 if r.status_code == 200:
                     member_count = len(r.json()["members"])
@@ -152,6 +156,7 @@ async def login_post(
         )
     if not row or not row["approved"] or not pwd_ctx.verify(password, row["pwd_hash"]):
         raise HTTPException(status_code=403, detail="Invalid credentials or not yet approved.")
+
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
         COOKIE_NAME,
@@ -183,7 +188,9 @@ async def approve_user(request: Request, username: str = Form(...)):
 @login_required
 async def admin_panel(request: Request, user: str):
     async with db.acquire() as conn:
-        codes = await conn.fetch("SELECT name, pin, public FROM codes ORDER BY name")
+        codes = await conn.fetch(
+            "SELECT name, pin, public FROM codes ORDER BY name"
+        )
     return templates.TemplateResponse(
         "admin.html",
         {
@@ -200,7 +207,7 @@ async def admin_panel(request: Request, user: str):
 async def add_code(
     request: Request, user: str,
     name: str = Form(...),
-    pin: str = Form(...),
+    pin: str  = Form(...),
     public: str | None = Form(None)
 ):
     if not (pin.isdigit() and len(pin) == 4):
@@ -215,7 +222,10 @@ async def add_code(
 
 @app.post("/codes/remove")
 @login_required
-async def remove_code(request: Request, user: str, name: str = Form(...)):
+async def remove_code(
+    request: Request, user: str,
+    name: str = Form(...)
+):
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM codes WHERE name=$1", name)
     return RedirectResponse("/admin", status_code=303)
