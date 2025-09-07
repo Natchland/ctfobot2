@@ -1,5 +1,6 @@
 import os, datetime, asyncpg, httpx
 from pathlib import Path
+from functools import wraps          # ← added
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
 from fastapi import (
@@ -58,11 +59,18 @@ async def current_user(request: Request):
     return row["username"] if row and row["approved"] else None
 
 def login_required(endpoint):
-    async def wrapper(request: Request, *args, **kw):
+    """
+    Decorator that:
+      • checks the signed cookie
+      • injects `user` into the real handler
+      • avoids exposing *args / **kwargs to FastAPI (fixes “Field required” error)
+    """
+    @wraps(endpoint)
+    async def wrapper(request: Request, **path_params):
         user = await current_user(request)
-        if user:
-            return await endpoint(request, user, *args, **kw)
-        return RedirectResponse("/login", status_code=303)
+        if not user:
+            return RedirectResponse("/login", status_code=303)
+        return await endpoint(request, user, **path_params)
     return wrapper
 
 # ────────────────── Public page ────────────────────────
