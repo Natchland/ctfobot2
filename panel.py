@@ -1,4 +1,3 @@
-app = FastAPI(debug=True)
 from fastapi import FastAPI, Request, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
@@ -9,6 +8,7 @@ from datetime import datetime
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+app = FastAPI(debug=True)
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
