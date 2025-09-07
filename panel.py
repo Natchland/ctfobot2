@@ -1,3 +1,4 @@
+app = FastAPI(debug=True)
 from fastapi import FastAPI, Request, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
@@ -6,10 +7,8 @@ import asyncpg
 import os
 from datetime import datetime
 
-app = FastAPI(debug=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
