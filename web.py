@@ -44,33 +44,25 @@ async def startup():
         """)
 
 # ────────────────── Auth helpers ───────────────────────
+from functools import update_wrapper          # change: update_wrapper, not wraps
+
 async def current_user(request: Request):
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
-        return None
-    try:
-        username = signer.loads(token)
-    except BadSignature:
-        return None
-    async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT username, approved FROM admins WHERE username=$1", username
-        )
+    ...  # unchanged
     return row["username"] if row and row["approved"] else None
 
 def login_required(endpoint):
     """
-    Decorator that:
-      • checks the signed cookie
-      • injects `user` into the real handler
-      • avoids exposing *args / **kwargs to FastAPI (fixes “Field required” error)
+    Checks cookie, injects `user`, but hides that param from FastAPI
+    so it’s NOT treated as a query field.
     """
-    @wraps(endpoint)
     async def wrapper(request: Request, **path_params):
         user = await current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=303)
         return await endpoint(request, user, **path_params)
+
+    # copy name / docstring only – keep wrapper’s own signature
+    update_wrapper(wrapper, endpoint, updated=())
     return wrapper
 
 # ────────────────── Public page ────────────────────────
