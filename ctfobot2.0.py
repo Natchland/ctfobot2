@@ -36,7 +36,7 @@ FOCUS_ROLE_IDS = {
 TEMP_BAN_SECONDS     = 7 * 24 * 60 * 60
 GIVEAWAY_ROLE_ID     = 1403337937722019931
 GIVEAWAY_CH_ID       = 1413929735658016899
-CODES_CH_ID          = 1413929735658016899
+CODES_CH_ID          = 1398667158237483138
 EMBED_TITLE          = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG       = "END:"
 FOOTER_PRIZE_TAG     = "PRIZE:"
@@ -279,12 +279,6 @@ class CodesCog(commands.Cog):
         self.db = db
 
     codes_group = app_commands.Group(name="codes", description="Manage access codes")
-
-    @codes_group.command(name="list", description="Show the current access codes")
-    async def codes_list(self, inter: discord.Interaction):
-        codes = await self.db.get_codes()
-        embed = build_codes_embed(codes)
-        await inter.response.send_message(embed=embed, ephemeral=True)
 
     @codes_group.command(name="add", description="Add a new code")
     @app_commands.describe(name="Name of the code", pin="4-digit code (e.g. 1234)")
