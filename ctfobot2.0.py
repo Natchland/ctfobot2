@@ -307,21 +307,27 @@ async def update_codes_message(bot: commands.Bot, codes: dict):
 async def listen_for_code_changes():
     """
     Dedicated connection LISTENing on 'codes_changed'.
-    When a NOTIFY arrives, re-load the table and refresh the embed.
+    We register an asyncpg listener callback instead of polling .notifies,
+    so every NOTIFY is delivered immediately.
     """
     conn: asyncpg.Connection = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("LISTEN codes_changed")
-    snapshot = await db.get_codes()
 
-    while True:
+    async def _on_notify(*_):
+        # fetch fresh snapshot and update the embed
         try:
-            await conn.connection.notifies.get(timeout=60)
-        except asyncio.TimeoutError:
-            continue   # loop so we can exit cleanly on shutdown
-        current = await db.get_codes()
-        if current != snapshot:
-            snapshot = current
-            await update_codes_message(bot, current)
+            codes = await db.get_codes()
+            await update_codes_message(bot, codes)
+        except Exception as e:          # never let the listener crash
+            print("codes_changed listener error:", e)
+
+    # register callback and start LISTEN
+    await conn.add_listener("codes_changed",
+                            lambda *args: asyncio.create_task(_on_notify()))
+
+    # keep the task alive forever
+    while not bot.is_closed():
+        await asyncio.sleep(3600)
+
 
 # ══════════════════════════════════════════════════════════════════════
 async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
