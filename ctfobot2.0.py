@@ -71,9 +71,12 @@ bot.giveaway_stop_events: dict[int, asyncio.Event] = {}
 # ══════════════════════════════════════════════════════════════════════
 class Database:
     def __init__(self, dsn: str):
-        self.dsn  = dsn
+        self.dsn = dsn
         self.pool: asyncpg.Pool | None = None
 
+    # ────────────────────────────────────────────────────────────────
+    #  CONNECTION / SCHEMA
+    # ────────────────────────────────────────────────────────────────
     async def connect(self):
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
         await self.init_tables()
@@ -111,8 +114,26 @@ class Database:
                 data       JSONB
             );
             """)
+            # ── Trigger + NOTIFY so the bot sees external edits ─────
+            await conn.execute("""
+            CREATE OR REPLACE FUNCTION notify_codes_changed()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify('codes_changed', 'refresh');
+                RETURN NEW;
+            END; $$ LANGUAGE plpgsql;
+            """)
+            await conn.execute("""
+            DROP TRIGGER IF EXISTS codes_changed_trigger ON codes;
+            CREATE TRIGGER codes_changed_trigger
+            AFTER INSERT OR UPDATE OR DELETE ON codes
+            FOR EACH STATEMENT
+            EXECUTE FUNCTION notify_codes_changed();
+            """)
 
-    # ── Codes ────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  CODES helpers
+    # ────────────────────────────────────────────────────────────────
     async def get_codes(self, *, only_public: bool = False):
         q = "SELECT name, pin, public FROM codes"
         if only_public:
@@ -125,9 +146,9 @@ class Database:
     async def add_code(self, name: str, pin: str, public: bool):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO codes (name, pin, public)
-                VALUES ($1,$2,$3)
-                ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
+            INSERT INTO codes (name, pin, public)
+            VALUES ($1,$2,$3)
+            ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
             """, name, pin, public)
 
     async def edit_code(self, name: str, pin: str, public: bool | None = None):
@@ -143,7 +164,9 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM codes WHERE name=$1", name)
 
-    # ── Reviewers ────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  REVIEWERS
+    # ────────────────────────────────────────────────────────────────
     async def get_reviewers(self):
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT user_id FROM reviewers")
@@ -160,7 +183,9 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
 
-    # ── Activity ─────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  ACTIVITY
+    # ────────────────────────────────────────────────────────────────
     async def get_activity(self, uid: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM activity WHERE user_id=$1", uid)
@@ -180,7 +205,9 @@ class Database:
             rows = await conn.fetch("SELECT * FROM activity")
             return {r['user_id']: dict(r) for r in rows}
 
-    # ── Giveaways ────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  GIVEAWAYS
+    # ────────────────────────────────────────────────────────────────
     async def add_giveaway(self, ch_id, msg_id, prize, end_ts):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -198,7 +225,9 @@ class Database:
             rows = await conn.fetch("SELECT * FROM giveaways WHERE active=TRUE")
             return [dict(r) for r in rows]
 
-    # ── Member-forms ────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  MEMBER FORMS
+    # ────────────────────────────────────────────────────────────────
     async def add_member_form(self, uid, data: dict):
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -215,9 +244,6 @@ class Database:
             else:
                 rows = await conn.fetch("SELECT * FROM member_forms")
             return [dict(r) for r in rows]
-
-
-db = Database(DATABASE_URL)
 
 # ══════════════════════════════════════════════════════════════════════
 #                        UTILITIES  /  EMBEDS
@@ -274,6 +300,28 @@ async def update_codes_message(bot: commands.Bot, codes: dict):
     os.makedirs("/data", exist_ok=True)
     with open(store, "w") as fp:
         fp.write(str(msg.id))
+
+# ──────────────────────────────────────────────────────────────────────
+#  Background listener – refresh codes embed when DB sends NOTIFY
+# ──────────────────────────────────────────────────────────────────────
+async def listen_for_code_changes():
+    """
+    Dedicated connection LISTENing on 'codes_changed'.
+    When a NOTIFY arrives, re-load the table and refresh the embed.
+    """
+    conn: asyncpg.Connection = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("LISTEN codes_changed")
+    snapshot = await db.get_codes()
+
+    while True:
+        try:
+            await conn.connection.notifies.get(timeout=60)
+        except asyncio.TimeoutError:
+            continue   # loop so we can exit cleanly on shutdown
+        current = await db.get_codes()
+        if current != snapshot:
+            snapshot = current
+            await update_codes_message(bot, current)
 
 # ══════════════════════════════════════════════════════════════════════
 async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
@@ -977,14 +1025,22 @@ async def on_ready():
     await db.connect()
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+    # sync slash-commands to the guild
     guild_obj = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
     print("Slash-commands synced")
 
+    # initial /codes embed
     await update_codes_message(bot, await db.get_codes())
+
+    # resume any giveaways stored in DB
     await resume_giveaways()
-    print("Giveaways resumed")
+
+    # start the LISTEN codes_changed background task
+    bot.loop.create_task(listen_for_code_changes())
+
+    print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
 if not BOT_TOKEN or not DATABASE_URL:
