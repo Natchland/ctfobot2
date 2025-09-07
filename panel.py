@@ -6,7 +6,6 @@ import asyncpg
 import os
 from datetime import datetime
 
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 app = FastAPI(debug=True)
 templates = Jinja2Templates(directory="templates")
@@ -23,13 +22,12 @@ async def startup():
 async def index(request: Request):
     async with db_pool.acquire() as conn:
         codes = await conn.fetch("SELECT name, pin FROM codes ORDER BY name")
-    # Pass 'year' to the template!
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
             "codes": codes,
-            "year": datetime.now().year,
+            "year": datetime.now().year,  # Pass the year for copyright
         },
     )
 
