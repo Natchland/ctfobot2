@@ -5,6 +5,7 @@ fastapi
 uvicorn
 jinja2
 python-multipart
-passlib[bcrypt]>=1.7.5
 itsdangerous>=2.1
 httpx
+passlib[bcrypt]>=1.7.5
+bcrypt<4.0  
