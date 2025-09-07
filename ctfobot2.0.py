@@ -63,11 +63,11 @@ intents.members         = True
 intents.message_content = True
 
 bot                     = commands.Bot(command_prefix="!", intents=intents)
-bot.last_anonymous_time = {}          # user-id -> datetime
+bot.last_anonymous_time: dict[int, datetime] = {}
 bot.giveaway_stop_events: dict[int, asyncio.Event] = {}
 
 # ══════════════════════════════════════════════════════════════════════
-#                               DATABASE
+#                                DATABASE
 # ══════════════════════════════════════════════════════════════════════
 class Database:
     def __init__(self, dsn: str):
@@ -133,15 +133,11 @@ class Database:
     async def edit_code(self, name: str, pin: str, public: bool | None = None):
         async with self.pool.acquire() as conn:
             if public is None:
-                await conn.execute(
-                    "UPDATE codes SET pin=$2 WHERE name=$1",
-                    name, pin
-                )
+                await conn.execute("UPDATE codes SET pin=$2 WHERE name=$1",
+                                   name, pin)
             else:
-                await conn.execute(
-                    "UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
-                    name, pin, public
-                )
+                await conn.execute("UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
+                                   name, pin, public)
 
     async def remove_code(self, name: str):
         async with self.pool.acquire() as conn:
@@ -213,8 +209,9 @@ class Database:
     async def get_member_forms(self, uid: int | None = None):
         async with self.pool.acquire() as conn:
             if uid:
-                rows = await conn.fetch("SELECT * FROM member_forms WHERE user_id=$1",
-                                        uid)
+                rows = await conn.fetch(
+                    "SELECT * FROM member_forms WHERE user_id=$1", uid
+                )
             else:
                 rows = await conn.fetch("SELECT * FROM member_forms")
             return [dict(r) for r in rows]
@@ -227,6 +224,7 @@ db = Database(DATABASE_URL)
 # ══════════════════════════════════════════════════════════════════════
 def build_codes_embed(codes: dict[str, tuple[str, bool]]) -> discord.Embed:
     """
+    Build embed listing all codes.
     codes = {name: (pin, public)}
     """
     e = discord.Embed(
@@ -307,7 +305,12 @@ async def on_message(m: discord.Message):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.guild.id == GUILD_ID and not member.bot and not before.channel and after.channel:
+    if (
+        member.guild.id == GUILD_ID
+        and not member.bot
+        and not before.channel
+        and after.channel
+    ):
         await mark_active(member)
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
@@ -418,7 +421,7 @@ class CodesCog(commands.Cog):
 codes_cog = CodesCog(bot, db)
 bot.tree.add_command(codes_cog.codes_group)
 
-# ───────────────────────────── Reviewer quick-commands ─────────────────
+# ───────── Reviewer helper commands ─────────
 @bot.tree.command(name="addreviewer")
 async def add_reviewer(i: discord.Interaction, member: discord.Member):
     if not i.user.guild_permissions.administrator:
@@ -449,7 +452,7 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
     if not ch:
         return await inter.response.send_message("Channel missing.", ephemeral=True)
 
-    now  = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     last = bot.last_anonymous_time.get(inter.user.id)
 
     if anonymous and last and now - last < timedelta(days=1):
@@ -480,7 +483,7 @@ async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
     await ch.send(embed=embed)
     await inter.response.send_message("Thanks!", ephemeral=True)
 
-# ═════════════════════════ REGISTRATION WORKFLOW ══════════════════════
+# ═══════════════════════ REGISTRATION WORKFLOW ════════════════════════
 def opts(*lbl: str):
     return [discord.SelectOption(label=l, value=l) for l in lbl]
 
@@ -538,23 +541,40 @@ class _BaseSelect(discord.ui.Select):
                 wait=True,
             )
 
-class SelectAge   (_BaseSelect):
-    def __init__(self, v): super().__init__(v, "age",    placeholder="Age",
-                                            options=opts("12-14","15-17","18-21","21+"))
+class SelectAge(_BaseSelect):
+    def __init__(self, v):
+        super().__init__(
+            v, "age", placeholder="Age",
+            options=opts("12-14", "15-17", "18-21", "21+")
+        )
+
 class SelectRegion(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "region", placeholder="Region",
-                                            options=opts("North America","Europe","Asia","Other"))
-class SelectBans  (_BaseSelect):
-    def __init__(self, v): super().__init__(v, "bans",   placeholder="Any bans?",
-                                            options=opts("Yes","No"))
-class SelectFocus (_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v,"focus",placeholder="Main focus",
-        options=opts("PvP","Farming","Base Sorting","Building","Electricity"))
-class SelectSkill (_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v,"skill",placeholder="Skill level",
-        options=opts("Beginner","Intermediate","Advanced","Expert"))
+    def __init__(self, v):
+        super().__init__(
+            v, "region", placeholder="Region",
+            options=opts("North America", "Europe", "Asia", "Other")
+        )
+
+class SelectBans(_BaseSelect):
+    def __init__(self, v):
+        super().__init__(
+            v, "bans", placeholder="Any bans?",
+            options=opts("Yes", "No")
+        )
+
+class SelectFocus(_BaseSelect):
+    def __init__(self, v):
+        super().__init__(
+            v, "focus", placeholder="Main focus",
+            options=opts("PvP", "Farming", "Base Sorting", "Building", "Electricity")
+        )
+
+class SelectSkill(_BaseSelect):
+    def __init__(self, v):
+        super().__init__(
+            v, "skill", placeholder="Skill level",
+            options=opts("Beginner", "Intermediate", "Advanced", "Expert")
+        )
 
 class ActionView(discord.ui.View):
     def __init__(self, guild, uid, region, focus):
@@ -646,12 +666,15 @@ class FinalRegistrationModal(discord.ui.Modal):
         super().__init__(title="More Details" if needs_ban else "Additional Info")
         self.v = v
 
-        self.steam  = discord.ui.TextInput(label="Steam Profile Link",
-                                           placeholder="https://steamcommunity.com/…",
-                                           required=True)
-        self.hours  = discord.ui.TextInput(label="Hours in Rust", required=True)
-        self.heard  = discord.ui.TextInput(label="Where did you hear about us?",
-                                           required=True)
+        self.steam = discord.ui.TextInput(
+            label="Steam Profile Link",
+            placeholder="https://steamcommunity.com/…",
+            required=True,
+        )
+        self.hours = discord.ui.TextInput(label="Hours in Rust", required=True)
+        self.heard = discord.ui.TextInput(
+            label="Where did you hear about us?", required=True
+        )
 
         self.ban_expl = self.gender = self.referral = None
         if needs_ban:
@@ -663,8 +686,9 @@ class FinalRegistrationModal(discord.ui.Modal):
             self.referral = discord.ui.TextInput(
                 label="Referral (optional)", required=False
             )
-            comps = (self.steam, self.hours, self.heard,
-                     self.ban_expl, self.referral)
+            components = (
+                self.steam, self.hours, self.heard, self.ban_expl, self.referral
+            )
         else:
             self.referral = discord.ui.TextInput(
                 label="Referral (optional)", required=False
@@ -672,10 +696,11 @@ class FinalRegistrationModal(discord.ui.Modal):
             self.gender = discord.ui.TextInput(
                 label="Gender (optional)", required=False
             )
-            comps = (self.steam, self.hours, self.heard,
-                     self.referral, self.gender)
+            components = (
+                self.steam, self.hours, self.heard, self.referral, self.gender
+            )
 
-        for c in comps:
+        for c in components:
             self.add_item(c)
 
     async def on_submit(self, inter):
@@ -691,28 +716,35 @@ class FinalRegistrationModal(discord.ui.Modal):
             .set_thumbnail(url=user.display_avatar.url)
         )
         e.add_field(name="\u200b", value="\u200b", inline=False)
-        e.add_field(name="👤 User",   value=user.mention, inline=False)
-        e.add_field(name="🔗 Steam",  value=self.steam.value, inline=False)
-        e.add_field(name="🗓️ Age",   value=d["age"],   inline=True)
-        e.add_field(name="🌍 Region", value=d["region"],inline=True)
-        e.add_field(name="🚫 Bans",   value=d["bans"],  inline=True)
+        e.add_field(name="👤 User", value=user.mention, inline=False)
+        e.add_field(name="🔗 Steam", value=self.steam.value, inline=False)
+        e.add_field(name="🗓️ Age", value=d["age"], inline=True)
+        e.add_field(name="🌍 Region", value=d["region"], inline=True)
+        e.add_field(name="🚫 Bans", value=d["bans"], inline=True)
         if d["bans"] == "Yes" and self.ban_expl:
-            e.add_field(name="📝 Ban Explanation", value=self.ban_expl.value,
-                        inline=False)
+            e.add_field(
+                name="📝 Ban Explanation", value=self.ban_expl.value, inline=False
+            )
         e.add_field(name="🎯 Focus", value=d["focus"], inline=True)
         e.add_field(name="⭐ Skill", value=d["skill"], inline=True)
-        e.add_field(name="⏱️ Hours",value=self.hours.value,inline=True)
-        e.add_field(name="📢 Heard about us", value=self.heard.value, inline=False)
-        e.add_field(name="🤝 Referral",
-                    value=self.referral.value if self.referral else "N/A",
-                    inline=True)
+        e.add_field(name="⏱️ Hours", value=self.hours.value, inline=True)
+        e.add_field(
+            name="📢 Heard about us", value=self.heard.value, inline=False
+        )
+        e.add_field(
+            name="🤝 Referral",
+            value=self.referral.value if self.referral else "N/A",
+            inline=True,
+        )
         if self.gender:
-            e.add_field(name="⚧️ Gender",
-                        value=self.gender.value or "N/A",
-                        inline=True)
+            e.add_field(
+                name="⚧️ Gender",
+                value=self.gender.value or "N/A",
+                inline=True,
+            )
         e.add_field(name="\u200b", value="\u200b", inline=False)
 
-        # persist data
+        # Save to persistent member_forms table
         await db.add_member_form(user.id, {
             "age": d["age"],
             "region": d["region"],
@@ -783,8 +815,9 @@ class GiveawayControl(discord.ui.View):
     def _admin(self, m):
         return m.guild_permissions.administrator or m.id == bot.owner_id
 
-    @discord.ui.button(label="End & Draw", style=discord.ButtonStyle.success,
-                       emoji="🎰", custom_id="gw_end")
+    @discord.ui.button(
+        label="End & Draw", style=discord.ButtonStyle.success, emoji="🎰", custom_id="gw_end"
+    )
     async def end(self, inter: discord.Interaction, _):
         if not self._admin(inter.user):
             return await inter.response.send_message(
@@ -792,8 +825,8 @@ class GiveawayControl(discord.ui.View):
             )
 
         chan = self.g.get_channel(self.ch)
-        msg  = await chan.fetch_message(self.msg_id)
-        win  = choice(eligible(self.g)) if eligible(self.g) else None
+        msg = await chan.fetch_message(self.msg_id)
+        win = choice(eligible(self.g)) if eligible(self.g) else None
 
         if win:
             await chan.send(
@@ -815,8 +848,9 @@ class GiveawayControl(discord.ui.View):
         await inter.response.send_message("Ended.", ephemeral=True)
         await db.end_giveaway(self.msg_id)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger,
-                       emoji="🛑", custom_id="gw_cancel")
+    @discord.ui.button(
+        label="Cancel", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="gw_cancel"
+    )
     async def cancel(self, inter: discord.Interaction, _):
         if not self._admin(inter.user):
             return await inter.response.send_message(
@@ -824,8 +858,8 @@ class GiveawayControl(discord.ui.View):
             )
 
         chan = self.g.get_channel(self.ch)
-        msg  = await chan.fetch_message(self.msg_id)
-        e    = msg.embeds[0]
+        msg = await chan.fetch_message(self.msg_id)
+        e = msg.embeds[0]
         put_field(e, 1, name="Time left", value="**CANCELLED**")
         put_field(e, 3, name="Eligible Entrants", value="Giveaway cancelled.")
         e.color = discord.Color.red()
@@ -835,9 +869,9 @@ class GiveawayControl(discord.ui.View):
         await inter.response.send_message("Cancelled.", ephemeral=True)
         await db.end_giveaway(self.msg_id)
 
-async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop: asyncio.Event):
+async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
     chan = g.get_channel(ch_id)
-    msg  = await chan.fetch_message(msg_id)
+    msg = await chan.fetch_message(msg_id)
 
     while not stop.is_set():
         rem = end_ts - int(datetime.now(timezone.utc).timestamp())
@@ -845,7 +879,7 @@ async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop: asyncio.Event):
             break
 
         txt = "\n".join(m.mention for m in eligible(g)) or "*None yet*"
-        e   = msg.embeds[0]
+        e = msg.embeds[0]
         put_field(e, 1, name="Time left", value=f"**{fmt_time(rem)}**")
         put_field(e, 3, name="Eligible Entrants", value=txt)
         try:
@@ -872,23 +906,22 @@ async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop: asyncio.Event):
     await db.end_giveaway(msg_id)
 
 async def resume_giveaways():
-    g  = bot.get_guild(GUILD_ID)
+    g = bot.get_guild(GUILD_ID)
     ch = g.get_channel(GIVEAWAY_CH_ID) if g else None
     if not g or not ch:
         return
 
+    # Start from DB
     for row in await db.get_active_giveaways():
         stop = asyncio.Event()
         bot.giveaway_stop_events[row['message_id']] = stop
-        v = GiveawayControl(g, row['channel_id'], row['message_id'],
-                            row['prize'], stop)
+        v = GiveawayControl(g, row['channel_id'], row['message_id'], row['prize'], stop)
         bot.add_view(v, message_id=row['message_id'])
-        asyncio.create_task(
-            run_giveaway(g, row['channel_id'], row['message_id'],
-                         row['prize'], row['end_ts'], stop)
-        )
+        asyncio.create_task(run_giveaway(
+            g, row['channel_id'], row['message_id'], row['prize'], row['end_ts'], stop
+        ))
 
-# ─────────────────────  /giveaway  (FIXED)  ───────────────────────────
+# ─────────────────────────  /giveaway command (FIXED)  ─────────────────
 @bot.tree.command(name="giveaway", description="Start a giveaway")
 @app_commands.check(lambda i: i.user.guild_permissions.administrator)
 @app_commands.choices(
@@ -900,17 +933,14 @@ async def resume_giveaways():
 )
 @app_commands.describe(prize="Prize to give away")
 async def giveaway(
-    inter: discord.Interaction,
-    duration: app_commands.Choice[int],
-    prize: str
+    inter: discord.Interaction, duration: app_commands.Choice[int], prize: str
 ):
-    # 1) acknowledge immediately to avoid 10062 Unknown interaction
+    # acknowledge immediately so we don't hit 10062 Unknown interaction
     await inter.response.defer(ephemeral=True)
 
-    g   = inter.guild
-    ch  = g.get_channel(GIVEAWAY_CH_ID)
+    g    = inter.guild
+    ch   = g.get_channel(GIVEAWAY_CH_ID)
     role = g.get_role(GIVEAWAY_ROLE_ID)
-
     if not ch or not role:
         return await inter.followup.send(
             "Giveaway channel/role missing.", ephemeral=True
@@ -926,13 +956,15 @@ async def giveaway(
     embed.add_field(name="Eligible Entrants",value="*Updating…*", inline=False)
     embed.set_footer(text=f"||{FOOTER_END_TAG}{end_ts}|{FOOTER_PRIZE_TAG}{prize}||")
 
-    v   = GiveawayControl(g, ch.id, 0, prize, stop)
-    msg = await ch.send(embed=embed, view=v)
-    v.msg_id = v.message_id = msg.id
-    bot.add_view(v, message_id=msg.id)
+    view = GiveawayControl(g, ch.id, 0, prize, stop)
+    msg  = await ch.send(embed=embed, view=view)
+    view.msg_id = view.message_id = msg.id
+    bot.add_view(view, message_id=msg.id)
 
     await db.add_giveaway(ch.id, msg.id, prize, end_ts)
-    asyncio.create_task(run_giveaway(g, ch.id, msg.id, prize, end_ts, stop))
+    asyncio.create_task(
+        run_giveaway(g, ch.id, msg.id, prize, end_ts, stop)
+    )
 
     await inter.followup.send(
         f"Giveaway started in {ch.mention}.", ephemeral=True
@@ -945,16 +977,12 @@ async def on_ready():
     await db.connect()
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    # sync slash-commands to guild
     guild_obj = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
     print("Slash-commands synced")
 
-    # ensure /codes message exists / updated
     await update_codes_message(bot, await db.get_codes())
-
-    # restart any active giveaways from DB
     await resume_giveaways()
     print("Giveaways resumed")
 

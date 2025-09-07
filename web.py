@@ -2,17 +2,15 @@ import os, datetime, asyncpg, httpx, inspect
 from pathlib import Path
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
-from fastapi import (
-    FastAPI, Request, Form, Response, HTTPException
-)
+from fastapi import FastAPI, Request, Form, Response, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 # ─────────────────────── Config ───────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")   # set in Railway
-OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")  # set in Railway
+WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")
+OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")
 COOKIE_NAME  = "ctfo_admin"
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -39,19 +37,16 @@ async def startup():
             username TEXT PRIMARY KEY,
             pwd_hash TEXT NOT NULL,
             approved BOOLEAN NOT NULL DEFAULT FALSE
-        );
-        """)
+        );""")
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS codes (
             name TEXT PRIMARY KEY,
             pin TEXT NOT NULL,
             public BOOLEAN NOT NULL DEFAULT FALSE
-        );
-        """)
+        );""")
 
 # ────────────────── Auth helpers ───────────────────────
 async def current_user(request: Request):
-    """Return username if a valid signed cookie exists and user is approved."""
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         return None
@@ -69,34 +64,36 @@ async def current_user(request: Request):
 
 def login_required(endpoint):
     """
-    Decorator that
-      • checks the signed cookie
-      • injects `user` into the real handler
-      • keeps all other parameters visible to FastAPI
+    Decorator that:
+      • checks the signed cookie,
+      • injects `user` into the endpoint,
+      • keeps all other parameters visible to FastAPI.
     """
-    sig = inspect.signature(endpoint)
-
-    # Build a new parameter list: keep everything except the injected *user*
-    new_params = [
-        p
-        for name, p in sig.parameters.items()
-        if name != "user"
-    ]
+    orig_sig = inspect.signature(endpoint)
+    exposed_params = [p for p in orig_sig.parameters.values() if p.name != "user"]
 
     async def wrapper(*args, **kwargs):
-        # `request` is always the first positional arg or a kwarg
-        request: Request = kwargs.get("request") or args[0]
-        logged_user = await current_user(request)
-        if not logged_user:
+        # locate Request
+        request = None
+        if args and isinstance(args[0], Request):
+            request = args[0]
+            remaining_pos = args[1:]
+        else:
+            request = kwargs.get("request")
+            remaining_pos = args
+        if request is None:
+            raise RuntimeError("Request object not found")
+
+        user = await current_user(request)
+        if not user:
             return RedirectResponse("/login", status_code=303)
 
-        # Forward the call with the injected user
-        return await endpoint(*args, logged_user, **kwargs)
+        kwargs.pop("request", None)  # avoid duplication
+        return await endpoint(request, user, *remaining_pos, **kwargs)
 
-    # Tell FastAPI that the wrapper has the same signature minus the *user*
-    wrapper.__signature__ = inspect.Signature(parameters=new_params)
-    wrapper.__name__ = endpoint.__name__
-    wrapper.__doc__  = endpoint.__doc__
+    wrapper.__signature__ = inspect.Signature(parameters=exposed_params)
+    wrapper.__name__      = endpoint.__name__
+    wrapper.__doc__       = endpoint.__doc__
     return wrapper
 
 # ────────────────── Public page ────────────────────────
@@ -156,18 +153,15 @@ async def login_post(
     password: str = Form(...)
 ):
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM admins WHERE username=$1", username
-        )
+        row = await conn.fetchrow("SELECT * FROM admins WHERE username=$1", username)
     if not row or not row["approved"] or not pwd_ctx.verify(password, row["pwd_hash"]):
-        raise HTTPException(status_code=403, detail="Invalid credentials or not yet approved.")
+        raise HTTPException(status_code=403,
+                            detail="Invalid credentials or not yet approved.")
 
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
-        COOKIE_NAME,
-        signer.dumps(username),
-        httponly=True,
-        max_age=86400 * 7
+        COOKIE_NAME, signer.dumps(username),
+        httponly=True, max_age=86400 * 7
     )
     return response
 
@@ -183,9 +177,7 @@ async def approve_user(request: Request, username: str = Form(...)):
     if request.headers.get("X-OWNER-KEY") != OWNER_KEY:
         raise HTTPException(status_code=403, detail="Bad owner key.")
     async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE admins SET approved=TRUE WHERE username=$1", username
-        )
+        await conn.execute("UPDATE admins SET approved=TRUE WHERE username=$1", username)
     return "approved"
 
 # ────────────────── Admin dashboard ─────────────────────
