@@ -306,9 +306,8 @@ async def update_codes_message(bot: commands.Bot, codes: dict):
 # ──────────────────────────────────────────────────────────────────────
 async def listen_for_code_changes() -> None:
     """
-    Opens a dedicated connection, LISTENs on ‘codes_changed’ and edits the
-    embed every time a NOTIFY is received.  If something goes wrong we print
-    a warning instead of crashing the bot.
+    Dedicated connection LISTENing on ‘codes_changed’.
+    When a NOTIFY arrives, reload the table and refresh the embed.
     """
     conn: asyncpg.Connection = await asyncpg.connect(DATABASE_URL)
 
@@ -317,21 +316,18 @@ async def listen_for_code_changes() -> None:
             codes = await db.get_codes()
             await update_codes_message(bot, codes)
             print(f"[codes_changed] embed refreshed at {datetime.utcnow()}")
-        except Exception as exc:         # never let the callback die silently
+        except Exception as exc:
             print("[codes_changed] error while refreshing embed:", exc)
 
-    # asyncpg delivers (connection, pid, channel, payload) → we ignore extras
-    def _listener(*_):
-        # run refresh_embed in the main event-loop (non-blocking)
-        bot.loop.create_task(refresh_embed())
+    def _listener(*_):                       # (conn, pid, channel, payload)
+        bot.loop.create_task(refresh_embed()) # fire-and-forget
 
-    await conn.add_listener("codes_changed", _listener)
+    conn.add_listener("codes_changed", _listener)   #  ←  no await here
     print("[codes_changed] listener attached")
 
-    # Keep the connection alive forever
     try:
         while not bot.is_closed():
-            await asyncio.sleep(3600)
+            await asyncio.sleep(3600)        # keep task alive
     finally:
         await conn.close()
 
