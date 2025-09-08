@@ -58,13 +58,21 @@ CODE_NAMES = ["Master", "Guest", "Electrician", "Other"]
 # ══════════════════════════════════════════════════════════════════════
 #                             BOT / INTENTS
 # ══════════════════════════════════════════════════════════════════════
-intents                 = discord.Intents.default()
-intents.members         = True
+class CTFBot(commands.Bot):
+    last_anonymous_time: dict[int, datetime]
+    giveaway_stop_events: dict[int, asyncio.Event]
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_anonymous_time = {}
+        self.giveaway_stop_events = {}
+
+# ── instantiate your custom bot ──
+intents = discord.Intents.default()
+intents.members = True
 intents.message_content = True
 
-bot                     = commands.Bot(command_prefix="!", intents=intents)
-bot.last_anonymous_time: dict[int, datetime] = {}
-bot.giveaway_stop_events: dict[int, asyncio.Event] = {}
+bot = CTFBot(command_prefix="!", intents=intents)
 
 # ══════════════════════════════════════════════════════════════════════
 #                                DATABASE
