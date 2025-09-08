@@ -66,3 +66,61 @@ html,body {
   align-items: center;
   justify-content: center;
 }
+
+/* ── CTFO Dark theme additions ─────────────────────────────── */
+:root {
+    --ctfo-bg:        #0e0e0f;
+    --ctfo-panel:     #1a1a1c;
+    --ctfo-border:    #262629;
+    --ctfo-red:       #c0392b;
+    --ctfo-green:     #27ae60;
+    --ctfo-amber:     #f39c12;
+    --ctfo-blue:      #2980b9;
+    --bs-body-bg:     var(--ctfo-bg);      /* override bootstrap var */
+    --bs-body-color:  #ddd;
+}
+body { background: var(--ctfo-bg); color: var(--bs-body-color); }
+
+.accordion-item {
+    background: var(--ctfo-panel);
+    border: 1px solid var(--ctfo-border);
+    border-radius: .35rem;
+}
+.accordion-button {
+    background: var(--ctfo-panel);
+    color: #ddd;
+    padding: .6rem 1rem;
+}
+.accordion-button:not(.collapsed) {
+    background: var(--ctfo-panel);
+    box-shadow: inset 0 -1px 0 rgba(255,255,255,.05);
+}
+.accordion-button::after { filter: invert(90%); }  /* arrow icon */
+
+.badge-status {
+    width: 22px; height: 22px; display: inline-flex;
+    align-items: center; justify-content: center;
+    font-size: .85rem; border-radius: 50%;
+}
+.badge-pending  { background: var(--ctfo-amber); }
+.badge-accepted { background: var(--ctfo-green); }
+.badge-denied   { background: var(--ctfo-red);   }
+
+textarea.form-control {
+    background: #111215;
+    color: #eee;
+    border: 1px solid var(--ctfo-border);
+}
+
+.btn-primary  { background: var(--ctfo-blue);   border: none; }
+.btn-success  { background: var(--ctfo-green);  border: none; }
+.btn-warning  { background: var(--ctfo-amber);  border: none; color:#000; }
+.btn-danger   { background: var(--ctfo-red);    border: none; }
+
+.btn-primary:disabled,
+.btn-warning:disabled {
+    opacity: .4;
+}
+
+/* make bottom padding so last item doesn't hug footer */
+#formAcc { padding-bottom: 1rem; }
