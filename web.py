@@ -123,128 +123,115 @@ async def admin_panel(request: Request, user: str):
             "year":  datetime.datetime.now().year,
         },
     )
-
-# ──────────────── Code management (unchanged) ───────────
-#     /codes/add  /codes/remove  …  (keep them)
-
-# ═══════════════ MEMBER-FORMS  (NEW) ════════════════════
-@app.post("/forms/update")
-@login_required
-async def update_form(
-    request: Request, user: str,
-    id:   int  = Form(...),
-    data: str  = Form(..., alias="json")   # <-- browser still sends “json”
-):
-    # validate
-    import json as _j
-    try:
-        _j.loads(data)
-    except Exception:
-        raise HTTPException(400, "Not valid JSON.")
-
-    async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE member_forms SET data=$2 WHERE id=$1",
-            id, data
-        )
-    return RedirectResponse("/admin#forms", status_code=303)
-
-# ───────────────── MEMBER-FORMS : ACCEPT ─────────────────
+# ───────────────── MEMBER-FORMS : ACCEPT ─────────────────────────────
 @app.post("/forms/accept")
 @login_required
 async def accept_member(
-    request: Request, user: str,
-    id: int = Form(...)
+    request: Request,
+    user: str,
+    id: int = Form(...),
 ):
     import json, asyncio
+
+    # 1) fetch the form
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id, data, status FROM member_forms WHERE id=$1", id
+            "SELECT user_id, data, status FROM member_forms WHERE id=$1",
+            id,
         )
+
     if not row or row["status"] != "pending":
         raise HTTPException(400, "Form not found or already handled")
 
-    data = row["data"]
-    if isinstance(data, str):                 # jsonb might be str
-        data = json.loads(data)
-    uid = row["user_id"]
+    data_raw = row["data"]
+    data = json.loads(data_raw) if isinstance(data_raw, str) else data_raw
+    applicant_id: int = row["user_id"]
 
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
 
     try:
-        member = await guild.fetch_member(uid)
-    except Exception:
-        raise HTTPException(404, "Member left the guild")
+        member = await guild.fetch_member(applicant_id)
+    except discord.NotFound:
+        raise HTTPException(404, "User left the guild")
 
-    # build role list
-    roles = []
-    g_role = guild.get_role
-    if (r := g_role(botmod.ACCEPT_ROLE_ID)): roles.append(r)
-    if (r := g_role(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))): roles.append(r)
-    if (r := g_role(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):  roles.append(r)
+    # Build role list
+    roles: list[discord.Role] = []
+    get_r = guild.get_role
+    if (r := get_r(botmod.ACCEPT_ROLE_ID)):
+        roles.append(r)
+    if (r := get_r(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))):
+        roles.append(r)
+    if (r := get_r(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):
+        roles.append(r)
+
     if not roles:
-        raise HTTPException(500, "Missing roles")
+        raise HTTPException(500, "Missing Discord roles")
 
     await member.add_roles(*roles, reason=f"Accepted via web panel by {user}")
 
-    # mark accepted
+    # Mark accepted
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE member_forms SET status='accepted' WHERE id=$1", id
+            "UPDATE member_forms SET status='accepted' WHERE id=$1",
+            id,
         )
 
     return RedirectResponse("/admin#forms", status_code=303)
 
 
-# ───────────────── MEMBER-FORMS : DENY  (temp-ban) ─────────────────
+# ───────────────── MEMBER-FORMS : DENY / TEMP-BAN ────────────────────
 @app.post("/forms/deny")
 @login_required
 async def deny_member(
-    request: Request, user: str,
-    id: int = Form(...)
+    request: Request,
+    user: str,
+    id: int = Form(...),
 ):
     import asyncio
+
+    # 1) fetch the form
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id, status FROM member_forms WHERE id=$1", id
+            "SELECT user_id, status FROM member_forms WHERE id=$1",
+            id,
         )
+
     if not row or row["status"] != "pending":
         raise HTTPException(400, "Form not found or already handled")
 
-    uid = row["user_id"]
+    applicant_id: int = row["user_id"]
 
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
 
-    try:
-        member = await guild.fetch_member(uid)
-    except Exception:
-        member = None          # may have left, we can still ban by ID
-
-    # 7-day temporary ban
+    # Ban (requires bot role to have Ban Members + higher than target)
     await guild.ban(
-        discord.Object(id=uid),
-        reason=f"Application denied via web panel by {user} – temp ban",
-        delete_message_seconds=0
+        discord.Object(id=applicant_id),
+        reason=f"Application denied via web panel by {user} (temp-ban)",
+        delete_message_seconds=0,
     )
 
-    # schedule unban
+    # Schedule unban
     async def unban_later():
         await asyncio.sleep(botmod.TEMP_BAN_SECONDS)
         try:
-            await guild.unban(discord.Object(id=uid),
-                              reason="Temp ban expired (auto)")
+            await guild.unban(
+                discord.Object(id=applicant_id),
+                reason="Temp ban expired (auto-unban)",
+            )
         except discord.HTTPException:
             pass
+
     asyncio.create_task(unban_later())
 
-    # mark denied
+    # Mark denied
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE member_forms SET status='denied' WHERE id=$1", id
+            "UPDATE member_forms SET status='denied' WHERE id=$1",
+            id,
         )
 
     return RedirectResponse("/admin#forms", status_code=303)
