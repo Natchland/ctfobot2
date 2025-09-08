@@ -341,18 +341,17 @@ async def listen_for_code_changes() -> None:
         except Exception as exc:
             print("[codes_changed] error while refreshing embed:", exc)
 
-    def _listener(*_):                       # (conn, pid, channel, payload)
-        bot.loop.create_task(refresh_embed()) # fire-and-forget
+    async def _listener(*_):              # (conn, pid, channel, payload)
+        await refresh_embed()             # run directly; it’s already a coro
 
-    conn.add_listener("codes_changed", _listener)   #  ←  no await here
+    await conn.add_listener("codes_changed", _listener)
     print("[codes_changed] listener attached")
 
     try:
         while not bot.is_closed():
-            await asyncio.sleep(3600)        # keep task alive
+            await asyncio.sleep(3600)     # keep task alive
     finally:
         await conn.close()
-
 
 # ══════════════════════════════════════════════════════════════════════
 async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
