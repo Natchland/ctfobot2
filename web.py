@@ -89,20 +89,19 @@ async def stop_discord_bot():
 async def all_admin_data():
     async with db.acquire() as conn:
         codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
-        forms = await conn.fetch(
-            "SELECT * FROM member_forms ORDER BY created_at DESC"
-        )
-        gws   = await conn.fetch(
-            "SELECT * FROM giveaways ORDER BY end_ts DESC"
-        )
-    # --- FIX: Ensure forms' data is always a dict ---
-    for f in forms:
+        forms = await conn.fetch("SELECT * FROM member_forms ORDER BY created_at DESC")
+        gws   = await conn.fetch("SELECT * FROM giveaways ORDER BY end_ts DESC")
+    # Convert each Record to dict and parse data
+    forms2 = []
+    for rec in forms:
+        f = dict(rec)
         if isinstance(f["data"], str):
             try:
                 f["data"] = json.loads(f["data"])
             except Exception:
                 f["data"] = {}
-    return codes, forms, gws
+        forms2.append(f)
+    return codes, forms2, gws
 
 @app.get("/admin", response_class=HTMLResponse)
 @login_required
