@@ -130,6 +130,7 @@ class Database:
             FOR EACH STATEMENT
             EXECUTE FUNCTION notify_codes_changed();
             """)
+    db = Database(DATABASE_URL)
 
     # ────────────────────────────────────────────────────────────────
     #  CODES helpers
