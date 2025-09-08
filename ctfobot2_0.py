@@ -120,8 +120,12 @@ class Database:
                 id         SERIAL PRIMARY KEY,
                 user_id    BIGINT,
                 created_at TIMESTAMP DEFAULT now(),
-                data       JSONB
+                data       JSONB,
             );
+            
+            -- make sure column exists even on old installations
+            ALTER TABLE member_forms
+                ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
             """)
             # ── NOTIFY for /codes edits → bot refresh ─────
             await conn.execute("""
@@ -1208,6 +1212,5 @@ async def on_ready():
 if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
 
-# Only run the bot when this file is executed directly
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)

@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request, Form, Response, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import discord
 
 # ────────────── import the Discord bot module ────────────────
 import ctfobot2_0 as botmod          #  ← make sure the file is ctfobot2_0.py
@@ -146,6 +147,106 @@ async def update_form(
             "UPDATE member_forms SET data=$2 WHERE id=$1",
             id, data
         )
+    return RedirectResponse("/admin#forms", status_code=303)
+
+# ───────────────── MEMBER-FORMS : ACCEPT ─────────────────
+@app.post("/forms/accept")
+@login_required
+async def accept_member(
+    request: Request, user: str,
+    id: int = Form(...)
+):
+    import json, asyncio
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id, data, status FROM member_forms WHERE id=$1", id
+        )
+    if not row or row["status"] != "pending":
+        raise HTTPException(400, "Form not found or already handled")
+
+    data = row["data"]
+    if isinstance(data, str):                 # jsonb might be str
+        data = json.loads(data)
+    uid = row["user_id"]
+
+    guild = botmod.bot.get_guild(botmod.GUILD_ID)
+    if not guild:
+        raise HTTPException(503, "Discord bot not ready")
+
+    try:
+        member = await guild.fetch_member(uid)
+    except Exception:
+        raise HTTPException(404, "Member left the guild")
+
+    # build role list
+    roles = []
+    g_role = guild.get_role
+    if (r := g_role(botmod.ACCEPT_ROLE_ID)): roles.append(r)
+    if (r := g_role(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))): roles.append(r)
+    if (r := g_role(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):  roles.append(r)
+    if not roles:
+        raise HTTPException(500, "Missing roles")
+
+    await member.add_roles(*roles, reason=f"Accepted via web panel by {user}")
+
+    # mark accepted
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE member_forms SET status='accepted' WHERE id=$1", id
+        )
+
+    return RedirectResponse("/admin#forms", status_code=303)
+
+
+# ───────────────── MEMBER-FORMS : DENY  (temp-ban) ─────────────────
+@app.post("/forms/deny")
+@login_required
+async def deny_member(
+    request: Request, user: str,
+    id: int = Form(...)
+):
+    import asyncio
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id, status FROM member_forms WHERE id=$1", id
+        )
+    if not row or row["status"] != "pending":
+        raise HTTPException(400, "Form not found or already handled")
+
+    uid = row["user_id"]
+
+    guild = botmod.bot.get_guild(botmod.GUILD_ID)
+    if not guild:
+        raise HTTPException(503, "Discord bot not ready")
+
+    try:
+        member = await guild.fetch_member(uid)
+    except Exception:
+        member = None          # may have left, we can still ban by ID
+
+    # 7-day temporary ban
+    await guild.ban(
+        discord.Object(id=uid),
+        reason=f"Application denied via web panel by {user} – temp ban",
+        delete_message_seconds=0
+    )
+
+    # schedule unban
+    async def unban_later():
+        await asyncio.sleep(botmod.TEMP_BAN_SECONDS)
+        try:
+            await guild.unban(discord.Object(id=uid),
+                              reason="Temp ban expired (auto)")
+        except discord.HTTPException:
+            pass
+    asyncio.create_task(unban_later())
+
+    # mark denied
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE member_forms SET status='denied' WHERE id=$1", id
+        )
+
     return RedirectResponse("/admin#forms", status_code=303)
 
 # ═══════════════ GIVEAWAYS   (NEW) ══════════════════════

@@ -19,37 +19,76 @@
       {% include "partials/admin_codes.html" %}
     </div>
 
-    <!-- MEMBER FORMS -->
-    <div class="tab-pane fade" id="forms">
-      {% if forms %}
-        <div class="accordion" id="formAcc">
-          {% for f in forms %}
-            <div class="accordion-item mb-2">
-              <h2 class="accordion-header" id="h{{f.id}}">
-                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c{{f.id}}">
-                  #{{f.id}} • user {{f.user_id}} • {{f.created_at}}
-                </button>
-              </h2>
-              <div id="c{{f.id}}" class="accordion-collapse collapse">
-                <div class="accordion-body">
-                  <form method="post" action="/forms/update" class="mb-2">
-                    <input type="hidden" name="id" value="{{f.id}}">
-                    <textarea name="json" rows="10" class="form-control mb-2">{{ f.data|tojson }}</textarea>
-                    <button class="btn btn-success">Save</button>
-                  </form>
-                  <form method="post" action="/forms/delete">
-                    <input type="hidden" name="id" value="{{f.id}}">
-                    <button class="btn btn-danger btn-sm">Delete</button>
-                  </form>
-                </div>
+<!--MEMBER FORMS ------------------------------------------------------------->
+<div class="tab-pane fade" id="forms">
+  {% if forms %}
+    <div class="accordion" id="formAcc">
+      {% for f in forms %}
+        {% set icon = '🕓' if f.status == 'pending'
+                   else '✅' if f.status == 'accepted'
+                   else '⛔' %}
+        <div class="accordion-item mb-2">
+          
+          <!-- Header -------------------------------------------------------- -->
+          <h2 class="accordion-header" id="h{{ f.id }}">
+            <button class="accordion-button collapsed" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#c{{ f.id }}">
+              {{ icon }}&nbsp; #{{ f.id }} • user {{ f.user_id }} • {{ f.created_at }}
+            </button>
+          </h2>
+
+          <!-- Body ---------------------------------------------------------- -->
+          <div id="c{{ f.id }}" class="accordion-collapse collapse"
+               data-bs-parent="#formAcc">
+            <div class="accordion-body">
+
+              <!-- JSON editor -->
+              <form method="post" action="/forms/update" class="mb-3">
+                <input type="hidden" name="id" value="{{ f.id }}">
+                <textarea name="json" rows="10"
+                          class="form-control mb-2">{{ f.data|tojson }}</textarea>
+                <button class="btn btn-success me-2">Save</button>
+              </form>
+
+              <!-- Action buttons -->
+              <div class="d-flex gap-2">
+                
+                <!-- Accept -->
+                <form method="post" action="/forms/accept">
+                  <input type="hidden" name="id" value="{{ f.id }}">
+                  <button class="btn btn-primary btn-sm"
+                          {% if f.status != 'pending' %}disabled{% endif %}>
+                    Accept&nbsp;User
+                  </button>
+                </form>
+
+                <!-- Deny / Temp-ban -->
+                <form method="post" action="/forms/deny">
+                  <input type="hidden" name="id" value="{{ f.id }}">
+                  <button class="btn btn-warning btn-sm"
+                          {% if f.status != 'pending' %}disabled{% endif %}>
+                    Deny&nbsp;/&nbsp;Temp-ban
+                  </button>
+                </form>
+
+                <!-- Optional: Delete record entirely -->
+                <form method="post" action="/forms/delete">
+                  <input type="hidden" name="id" value="{{ f.id }}">
+                  <button class="btn btn-danger btn-sm">Delete</button>
+                </form>
               </div>
-            </div>
-          {% endfor %}
-        </div>
-      {% else %}
-        <div class="alert alert-warning text-center">No member forms stored.</div>
-      {% endif %}
+
+            </div><!-- /.accordion-body -->
+          </div><!-- /.accordion-collapse -->
+        </div><!-- /.accordion-item -->
+      {% endfor %}
+    </div><!-- /.accordion -->
+  {% else %}
+    <div class="alert alert-warning text-center">
+      No member forms stored.
     </div>
+  {% endif %}
+</div><!-- /.tab-pane -->
 
     <!-- GIVEAWAYS -->
     <div class="tab-pane fade" id="giveaways">
