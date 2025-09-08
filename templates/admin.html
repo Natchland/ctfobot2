@@ -3,39 +3,92 @@
 
 {% block content %}
 <section class="container py-5">
-  <h2 class="mb-4" style="color:var(--neon)">Codes</h2>
-  <div class="card p-4 mx-auto" style="max-width:560px">
-    {% if codes %}
-      <ul class="list-group mb-4">
-        {% for c in codes %}
-          <li class="list-group-item d-flex justify-content-between align-items-center">
-            <span>
-              <strong>{{ c['name'] }}</strong> : <code>{{ c['pin'] }}</code>
-              {% if not c['public'] %}
-                <span class="badge badge-priv">priv</span>
-              {% endif %}
-            </span>
-            <form method="post" action="/codes/remove" class="m-0">
-              <input type="hidden" name="name" value="{{ c['name'] }}">
-              <button class="btn btn-sm btn-outline-danger">Delete</button>
-            </form>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <div class="alert alert-warning text-center">No codes yet.</div>
-    {% endif %}
 
-    <form class="row g-2 align-items-center" method="post" action="/codes/add">
-      <div class="col-4"><input name="name" class="form-control" placeholder="Name" required></div>
-      <div class="col-3"><input name="pin" class="form-control" placeholder="1234" pattern="\d{4}" required></div>
-      <div class="col-3 form-check">
-        <input class="form-check-input" type="checkbox" id="pub" name="public">
-        <label class="form-check-label" for="pub">Public</label>
-      </div>
-      <div class="col-2 d-grid"><button class="neon-btn btn">Save</button></div>
-    </form>
-  </div>
+  <!-- Tabs -->
+  <ul class="nav nav-tabs mb-4">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#codes">Codes</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#forms">Member&nbsp;Forms</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#giveaways">Giveaways</button></li>
+  </ul>
+
+  <!-- Tab panes -->
+  <div class="tab-content">
+
+    <!-- CODES -->
+    <div class="tab-pane fade show active" id="codes">
+      {% include "partials/admin_codes.html" %}
+    </div>
+
+    <!-- MEMBER FORMS -->
+    <div class="tab-pane fade" id="forms">
+      {% if forms %}
+        <div class="accordion" id="formAcc">
+          {% for f in forms %}
+            <div class="accordion-item mb-2">
+              <h2 class="accordion-header" id="h{{f.id}}">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c{{f.id}}">
+                  #{{f.id}} • user {{f.user_id}} • {{f.created_at}}
+                </button>
+              </h2>
+              <div id="c{{f.id}}" class="accordion-collapse collapse">
+                <div class="accordion-body">
+                  <form method="post" action="/forms/update" class="mb-2">
+                    <input type="hidden" name="id" value="{{f.id}}">
+                    <textarea name="json" rows="10" class="form-control mb-2">{{ f.data|tojson }}</textarea>
+                    <button class="btn btn-success">Save</button>
+                  </form>
+                  <form method="post" action="/forms/delete">
+                    <input type="hidden" name="id" value="{{f.id}}">
+                    <button class="btn btn-danger btn-sm">Delete</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="alert alert-warning text-center">No member forms stored.</div>
+      {% endif %}
+    </div>
+
+    <!-- GIVEAWAYS -->
+    <div class="tab-pane fade" id="giveaways">
+      {% if gws %}
+        <div class="table-responsive">
+          <table class="table table-dark table-striped align-middle">
+            <thead>
+              <tr><th>ID</th><th>Prize</th><th>Ends&nbsp;(unix)</th><th>Active?</th><th>Note</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {% for g in gws %}
+                <tr>
+                  <form method="post" action="/giveaways/update">
+                    <td><code>{{ g.id }}</code></td>
+                    <td><input name="prize" class="form-control form-control-sm" value="{{ g.prize }}"></td>
+                    <td><input name="end_ts" class="form-control form-control-sm" type="number" value="{{ g.end_ts }}"></td>
+                    <td>{{ '✅' if g.active else '⛔' }}</td>
+                    <td><input name="note" class="form-control form-control-sm" value="{{ g.note or '' }}"></td>
+                    <td class="d-flex gap-2">
+                      <input type="hidden" name="id" value="{{ g.id }}">
+                      <button class="btn btn-sm btn-success">Save</button>
+                  </form>
+                  <form method="post" action="/giveaways/end">
+                      <input type="hidden" name="id" value="{{ g.id }}">
+                      <button class="btn btn-sm btn-warning" {% if not g.active %}disabled{% endif %}>End</button>
+                  </form>
+                    </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="alert alert-info">No giveaways yet.</div>
+      {% endif %}
+    </div>
+
+  </div><!-- /.tab-content -->
+
   <footer class="text-muted text-center mt-5">&copy; {{ year }} CTFO Gaming</footer>
 </section>
 {% endblock %}

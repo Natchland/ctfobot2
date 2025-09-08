@@ -113,7 +113,8 @@ class Database:
                 message_id BIGINT,
                 prize      TEXT,
                 end_ts     BIGINT,
-                active     BOOLEAN
+                active     BOOLEAN,
+                note       TEXT
             );
             CREATE TABLE IF NOT EXISTS member_forms (
                 id         SERIAL PRIMARY KEY,
@@ -122,7 +123,7 @@ class Database:
                 data       JSONB
             );
             """)
-            # ── Trigger + NOTIFY so the bot sees external edits ─────
+            # ── NOTIFY for /codes edits → bot refresh ─────
             await conn.execute("""
             CREATE OR REPLACE FUNCTION notify_codes_changed()
             RETURNS trigger AS $$
@@ -137,6 +138,23 @@ class Database:
             AFTER INSERT OR UPDATE OR DELETE ON codes
             FOR EACH STATEMENT
             EXECUTE FUNCTION notify_codes_changed();
+            """)
+            # ── NOTIFY for /giveaways edits → bot refresh ──
+            await conn.execute("""
+            CREATE OR REPLACE FUNCTION notify_giveaways_changed()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify('giveaways_changed', NEW.id::text);
+                RETURN NEW;
+            END; $$ LANGUAGE plpgsql;
+            """)
+            await conn.execute("""
+            DROP TRIGGER IF EXISTS giveaways_changed_trigger ON giveaways;
+            CREATE TRIGGER giveaways_changed_trigger
+            AFTER UPDATE ON giveaways
+              FOR EACH ROW
+              WHEN (OLD.* IS DISTINCT FROM NEW.*)
+            EXECUTE FUNCTION notify_giveaways_changed();
             """)
 
     # ────────────────────────────────────────────────────────────────
@@ -910,6 +928,64 @@ def eligible(guild: discord.Guild):
     role = guild.get_role(GIVEAWAY_ROLE_ID)
     return [m for m in role.members if not m.bot] if role else []
 
+# ═════════════════════ GIVEAWAY REFRESHER (panel-driven) ═════════════
+async def refresh_giveaway_from_row(row: dict):
+    """
+    Patch the embed whenever the web panel updates a giveaway row.
+    """
+    guild = bot.get_guild(GUILD_ID)
+    chan  = guild.get_channel(row["channel_id"]) if guild else None
+    if not guild or not chan:
+        return
+    try:
+        msg = await chan.fetch_message(row["message_id"])
+    except discord.NotFound:
+        return
+
+    embed = msg.embeds[0]
+    # Update prize field (index 0 in our embed)
+    put_field(embed, 0, name="Prize", value=f"**{row['prize']}**", inline=False)
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    remaining = row["end_ts"] - now
+
+    if not row["active"]:
+        put_field(embed, 1, name="Time left", value="**ENDED**", inline=False)
+        embed.colour = discord.Color.dark_gray()
+        await msg.edit(embed=embed, view=None)
+        ev = bot.giveaway_stop_events.get(row["message_id"])
+        if ev and not ev.is_set():
+            ev.set()
+        return
+
+    # Still running
+    put_field(embed, 1, name="Time left", value=f"**{fmt_time(remaining)}**", inline=False)
+    embed.set_footer(text=f"{FOOTER_END_TAG}{row['end_ts']}|{FOOTER_PRIZE_TAG}{row['prize']}")
+    await msg.edit(embed=embed)
+
+
+async def listen_for_giveaway_changes():
+    """
+    LISTEN on Postgres channel 'giveaways_changed' so the bot reacts
+    to edits coming from the FastAPI admin panel.
+    """
+    conn = await asyncpg.connect(DATABASE_URL)
+
+    async def _listener(_c, _pid, _chan, payload):
+        gid = int(payload)
+        row = await db.pool.fetchrow("SELECT * FROM giveaways WHERE id=$1", gid)
+        if row:
+            await refresh_giveaway_from_row(dict(row))
+
+    await conn.add_listener("giveaways_changed", _listener)
+    print("[giveaways_changed] listener attached")
+
+    try:
+        while not bot.is_closed():
+            await asyncio.sleep(3600)
+    finally:
+        await conn.close()
+
 
 class GiveawayControl(discord.ui.View):
     def __init__(self, guild, ch_id, msg_id, prize, stop_event: asyncio.Event):
@@ -1124,6 +1200,7 @@ async def on_ready():
 
     # start the LISTEN codes_changed background task
     bot.loop.create_task(listen_for_code_changes())
+    bot.loop.create_task(listen_for_giveaway_changes())
 
     print("Giveaways resumed – code-listener running")
 

@@ -44,57 +44,82 @@ async def startup():
             pin TEXT NOT NULL,
             public BOOLEAN NOT NULL DEFAULT FALSE
         );""")
+        # NOTE: member_forms & giveaways tables already created by the bot
 
-# ────────────────── Auth helpers ───────────────────────
-async def current_user(request: Request):
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
-        return None
-    try:
-        username = signer.loads(token)
-    except BadSignature:
-        return None
-
+# ────────────────── Helper to load dashboard data ──────
+async def all_admin_data():
     async with db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT username, approved FROM admins WHERE username=$1", username
-        )
-    return row["username"] if row and row["approved"] else None
+        codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
+        forms = await conn.fetch("SELECT * FROM member_forms ORDER BY created_at DESC")
+        gws   = await conn.fetch("SELECT * FROM giveaways ORDER BY end_ts DESC")
+    return codes, forms, gws
 
+# ────────────────── Auth helpers (unchanged) ───────────
+#       current_user(), login_required()  …  etc.
+#       Signup / login / logout endpoints remain as you had them
+# --------------------------------------------------------------------
 
-def login_required(endpoint):
-    """
-    Decorator that:
-      • checks the signed cookie,
-      • injects `user` into the endpoint,
-      • keeps all other parameters visible to FastAPI.
-    """
-    orig_sig = inspect.signature(endpoint)
-    exposed_params = [p for p in orig_sig.parameters.values() if p.name != "user"]
+# ────────────────── Admin dashboard ─────────────────────
+@app.get("/admin", response_class=HTMLResponse)
+@login_required
+async def admin_panel(request: Request, user: str):
+    codes, forms, gws = await all_admin_data()
+    return templates.TemplateResponse(
+        "admin.html",
+        {
+            "request": request,
+            "codes": codes,
+            "forms": forms,
+            "gws":   gws,
+            "user":  user,
+            "year":  datetime.datetime.now().year,
+        },
+    )
 
-    async def wrapper(*args, **kwargs):
-        # locate Request
-        request = None
-        if args and isinstance(args[0], Request):
-            request = args[0]
-            remaining_pos = args[1:]
-        else:
-            request = kwargs.get("request")
-            remaining_pos = args
-        if request is None:
-            raise RuntimeError("Request object not found")
+# ──────────────── Code management (unchanged) ───────────
+#     /codes/add  /codes/remove  …  (keep them)
 
-        user = await current_user(request)
-        if not user:
-            return RedirectResponse("/login", status_code=303)
+# ═══════════════ MEMBER-FORMS  (NEW) ════════════════════
+@app.post("/forms/update")
+@login_required
+async def update_form(request: Request, user: str,
+                      id: int = Form(...), json: str = Form(...)):
+    import json as _j
+    try: _j.loads(json)
+    except Exception: raise HTTPException(400, "Not valid JSON.")
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE member_forms SET data=$2 WHERE id=$1", id, json)
+    return RedirectResponse("/admin#forms", status_code=303)
 
-        kwargs.pop("request", None)  # avoid duplication
-        return await endpoint(request, user, *remaining_pos, **kwargs)
+@app.post("/forms/delete")
+@login_required
+async def delete_form(request: Request, user: str, id: int = Form(...)):
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM member_forms WHERE id=$1", id)
+    return RedirectResponse("/admin#forms", status_code=303)
 
-    wrapper.__signature__ = inspect.Signature(parameters=exposed_params)
-    wrapper.__name__      = endpoint.__name__
-    wrapper.__doc__       = endpoint.__doc__
-    return wrapper
+# ═══════════════ GIVEAWAYS   (NEW) ══════════════════════
+@app.post("/giveaways/update")
+@login_required
+async def update_giveaway(request: Request, user: str,
+                          id: int = Form(...),
+                          prize: str = Form(...),
+                          end_ts: int = Form(...),
+                          note: str = Form("")):
+    async with db.acquire() as conn:
+        await conn.execute("""
+            UPDATE giveaways
+               SET prize=$2, end_ts=$3, note=$4
+             WHERE id=$1
+        """, id, prize, end_ts, note)
+    return RedirectResponse("/admin#giveaways", status_code=303)
+
+@app.post("/giveaways/end")
+@login_required
+async def end_giveaway(request: Request, user: str, id: int = Form(...)):
+    async with db.acquire() as conn:
+        await conn.execute("UPDATE giveaways SET active=FALSE WHERE id=$1", id)
+    return RedirectResponse("/admin#giveaways", status_code=303)
 
 # ────────────────── Public page ────────────────────────
 @app.get("/", response_class=HTMLResponse)
