@@ -131,153 +131,141 @@ class Database:
             EXECUTE FUNCTION notify_codes_changed();
             """)
 
-db = Database(DATABASE_URL) # ────────────────────────────────────────────────────────────────#  CODES helpers # ────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
+    #  CODES helpers
+    # ────────────────────────────────────────────────────────────────
+    async def get_codes(self, *, only_public: bool = False):
+        q = "SELECT name, pin, public FROM codes"
+        if only_public:
+            q += " WHERE public=TRUE"
+        q += " ORDER BY name"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(q)
+            return {r["name"]: (r["pin"], r["public"]) for r in rows}
 
-# ────────────────────────────────────────────────────────────────
-#  CODES helpers
-# ────────────────────────────────────────────────────────────────
-async def get_codes(self, *, only_public: bool = False):
-    q = "SELECT name, pin, public FROM codes"
-    if only_public:
-        q += " WHERE public=TRUE"
-    q += " ORDER BY name"
-    async with self.pool.acquire() as conn:
-        rows = await conn.fetch(q)
-        return {r["name"]: (r["pin"], r["public"]) for r in rows}
-
-async def add_code(self, name: str, pin: str, public: bool):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO codes (name, pin, public)
-            VALUES ($1,$2,$3)
-            ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
-            """,
-            name,
-            pin,
-            public,
-        )
-
-async def edit_code(self, name: str, pin: str, public: bool | None = None):
-    async with self.pool.acquire() as conn:
-        if public is None:
+    async def add_code(self, name: str, pin: str, public: bool):
+        async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE codes SET pin=$2 WHERE name=$1",
-                name,
-                pin,
-            )
-        else:
-            await conn.execute(
-                "UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
-                name,
-                pin,
-                public,
+                """
+                INSERT INTO codes (name, pin, public)
+                VALUES ($1,$2,$3)
+                ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
+                """,
+                name, pin, public
             )
 
-async def remove_code(self, name: str):
-    async with self.pool.acquire() as conn:
-        await conn.execute("DELETE FROM codes WHERE name=$1", name)
+    async def edit_code(self, name: str, pin: str, public: bool | None = None):
+        async with self.pool.acquire() as conn:
+            if public is None:
+                await conn.execute(
+                    "UPDATE codes SET pin=$2 WHERE name=$1",
+                    name, pin
+                )
+            else:
+                await conn.execute(
+                    "UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
+                    name, pin, public
+                )
 
-# ────────────────────────────────────────────────────────────────
-#  REVIEWERS
-# ────────────────────────────────────────────────────────────────
-async def get_reviewers(self):
-    async with self.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM reviewers")
-        return {r["user_id"] for r in rows}
+    async def remove_code(self, name: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM codes WHERE name=$1", name)
 
-async def add_reviewer(self, uid: int):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-            uid,
-        )
+    # ────────────────────────────────────────────────────────────────
+    #  REVIEWERS
+    # ────────────────────────────────────────────────────────────────
+    async def get_reviewers(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM reviewers")
+            return {r["user_id"] for r in rows}
 
-async def remove_reviewer(self, uid: int):
-    async with self.pool.acquire() as conn:
-        await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
+    async def add_reviewer(self, uid: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                uid
+            )
 
-# ────────────────────────────────────────────────────────────────
-#  ACTIVITY
-# ────────────────────────────────────────────────────────────────
-async def get_activity(self, uid: int):
-    async with self.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM activity WHERE user_id=$1", uid
-        )
-        return dict(row) if row else None
+    async def remove_reviewer(self, uid: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
 
-async def set_activity(self, uid, streak, date_, warned, last):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO activity (user_id, streak, date, warned, last)
-            VALUES ($1,$2,$3,$4,$5)
-            ON CONFLICT(user_id) DO UPDATE
-              SET streak=$2, date=$3, warned=$4, last=$5
-            """,
-            uid,
-            streak,
-            date_,
-            warned,
-            last,
-        )
+    # ────────────────────────────────────────────────────────────────
+    #  ACTIVITY
+    # ────────────────────────────────────────────────────────────────
+    async def get_activity(self, uid: int):
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM activity WHERE user_id=$1", uid
+            )
+            return dict(row) if row else None
 
-async def get_all_activity(self):
-    async with self.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM activity")
-        return {r["user_id"]: dict(r) for r in rows}
+    async def set_activity(self, uid, streak, date_, warned, last):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO activity (user_id, streak, date, warned, last)
+                VALUES ($1,$2,$3,$4,$5)
+                ON CONFLICT(user_id) DO UPDATE
+                  SET streak=$2, date=$3, warned=$4, last=$5
+                """,
+                uid, streak, date_, warned, last
+            )
 
-# ────────────────────────────────────────────────────────────────
-#  GIVEAWAYS
-# ────────────────────────────────────────────────────────────────
-async def add_giveaway(self, ch_id, msg_id, prize, end_ts):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO giveaways
-            (channel_id, message_id, prize, end_ts, active)
-            VALUES ($1,$2,$3,$4,TRUE)
-            """,
-            ch_id,
-            msg_id,
-            prize,
-            end_ts,
-        )
+    async def get_all_activity(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM activity")
+            return {r["user_id"]: dict(r) for r in rows}
 
-async def end_giveaway(self, msg_id):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE giveaways SET active=FALSE WHERE message_id=$1", msg_id
-        )
+    # ────────────────────────────────────────────────────────────────
+    #  GIVEAWAYS
+    # ────────────────────────────────────────────────────────────────
+    async def add_giveaway(self, ch_id, msg_id, prize, end_ts):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO giveaways
+                (channel_id, message_id, prize, end_ts, active)
+                VALUES ($1,$2,$3,$4,TRUE)
+                """,
+                ch_id, msg_id, prize, end_ts
+            )
 
-async def get_active_giveaways(self):
-    async with self.pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM giveaways WHERE active=TRUE"
-        )
-        return [dict(r) for r in rows]
+    async def end_giveaway(self, msg_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE giveaways SET active=FALSE WHERE message_id=$1",
+                msg_id
+            )
 
-# ────────────────────────────────────────────────────────────────
-#  MEMBER FORMS
-# ────────────────────────────────────────────────────────────────
-async def add_member_form(self, uid, data: dict):
-    async with self.pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO member_forms (user_id, data) VALUES ($1,$2)",
-            uid,
-            json.dumps(data),
-        )
-
-async def get_member_forms(self, uid: int | None = None):
-    async with self.pool.acquire() as conn:
-        if uid:
+    async def get_active_giveaways(self):
+        async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM member_forms WHERE user_id=$1", uid
+                "SELECT * FROM giveaways WHERE active=TRUE"
             )
-        else:
-            rows = await conn.fetch("SELECT * FROM member_forms")
-        return [dict(r) for r in rows]
+            return [dict(r) for r in rows]
+
+    # ────────────────────────────────────────────────────────────────
+    #  MEMBER FORMS
+    # ────────────────────────────────────────────────────────────────
+    async def add_member_form(self, uid, data: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO member_forms (user_id, data) VALUES ($1,$2)",
+                uid, json.dumps(data)
+            )
+
+    async def get_member_forms(self, uid: int | None = None):
+        async with self.pool.acquire() as conn:
+            if uid:
+                rows = await conn.fetch(
+                    "SELECT * FROM member_forms WHERE user_id=$1", uid
+                )
+            else:
+                rows = await conn.fetch("SELECT * FROM member_forms")
+            return [dict(r) for r in rows]
+
+db = Database(DATABASE_URL)
     
 # ══════════════════════════════════════════════════════════════════════
 #                        UTILITIES  /  EMBEDS
