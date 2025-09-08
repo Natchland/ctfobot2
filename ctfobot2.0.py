@@ -865,13 +865,31 @@ async def memberform(inter: discord.Interaction):
     )
 
 # ═══════════════════════════════ GIVEAWAYS ════════════════════════════
-def fmt_time(s: int) -> str:
-    d, s = divmod(s, 86400)
-    h, s = divmod(s, 3600)
-    m, s = divmod(s, 60)
-    return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m {s}s" if m else f"{s}s"
+def fmt_time(seconds: int) -> str:
+    """
+    Turn a number of seconds into a compact human-readable string.
+    Examples: 2d 4h, 3h 17m, 7m 12s, 4s
+    """
+    if seconds < 0:
+        seconds = 0
+
+    days, seconds = divmod(seconds, 86_400)
+    hours, seconds = divmod(seconds, 3_600)
+    mins, seconds = divmod(seconds, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if days or hours:
+        parts.append(f"{hours}h")
+    if days or hours or mins:
+        parts.append(f"{mins}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
 
 def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False):
+    """Insert / replace an embed field at a given index."""
     if idx < len(e.fields):
         e.set_field_at(idx, name=name, value=value, inline=inline)
     else:
@@ -879,127 +897,150 @@ def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False
             e.add_field(name="\u200b", value="\u200b", inline=False)
         e.add_field(name=name, value=value, inline=inline)
 
-def eligible(g: discord.Guild):
-    r = g.get_role(GIVEAWAY_ROLE_ID)
-    return [m for m in r.members if not m.bot] if r else []
+
+def eligible(guild: discord.Guild):
+    role = guild.get_role(GIVEAWAY_ROLE_ID)
+    return [m for m in role.members if not m.bot] if role else []
+
 
 class GiveawayControl(discord.ui.View):
-    def __init__(self, g, ch_id, msg_id, prize, stop):
+    def __init__(self, guild, ch_id, msg_id, prize, stop_event: asyncio.Event):
         super().__init__(timeout=None)
-        self.g, self.ch, self.msg_id, self.prize, self.stop = (
-            g, ch_id, msg_id, prize, stop
+        self.guild, self.ch_id, self.msg_id, self.prize, self.stop = (
+            guild, ch_id, msg_id, prize, stop_event
         )
 
-    def _admin(self, m):
-        return m.guild_permissions.administrator or m.id == bot.owner_id
+    # ---------- helpers ----------
+    def _admin(self, member: discord.Member) -> bool:
+        return member.guild_permissions.administrator or member.id == bot.owner_id
 
-    @discord.ui.button(
-        label="End & Draw", style=discord.ButtonStyle.success, emoji="🎰", custom_id="gw_end"
-    )
+    async def _finish(self, ended_text: str, colour: discord.Colour):
+        chan = self.guild.get_channel(self.ch_id)
+        msg  = await chan.fetch_message(self.msg_id)
+
+        embed = msg.embeds[0]
+        put_field(embed, 1, name="Time left", value=f"**{ended_text}**")
+        put_field(embed, 3, name="Eligible Entrants",
+                  value=f"Giveaway {ended_text.lower()}.")
+        embed.color = colour
+        await msg.edit(embed=embed, view=None)
+        self.stop.set()
+        await db.end_giveaway(self.msg_id)
+
+    # ---------- buttons ----------
+    @discord.ui.button(label="End & Draw", style=discord.ButtonStyle.success,
+                       emoji="🎰", custom_id="gw_end")
     async def end(self, inter: discord.Interaction, _):
         if not self._admin(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
-
-        chan = self.g.get_channel(self.ch)
-        msg = await chan.fetch_message(self.msg_id)
-        win = choice(eligible(self.g)) if eligible(self.g) else None
-
-        if win:
+            return await inter.response.send_message("Not authorised.",
+                                                     ephemeral=True)
+        chan = self.guild.get_channel(self.ch_id)
+        winner = choice(eligible(self.guild)) if eligible(self.guild) else None
+        if winner:
             await chan.send(
                 embed=discord.Embed(
                     title=f"🎉 {self.prize} – WINNER 🎉",
-                    description=f"Congrats {win.mention}! Enjoy **{self.prize}**!",
+                    description=f"Congrats {winner.mention}! Enjoy **{self.prize}**!",
                     colour=discord.Color.gold(),
                 )
             )
         else:
             await chan.send("No eligible entrants.")
-
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value="**ENDED**")
-        put_field(e, 3, name="Eligible Entrants", value="Giveaway ended early.")
-        e.color = discord.Color.dark_gray()
-        await msg.edit(embed=e, view=None)
-        self.stop.set()
+        await self._finish("ENDED", discord.Color.dark_gray())
         await inter.response.send_message("Ended.", ephemeral=True)
-        await db.end_giveaway(self.msg_id)
 
-    @discord.ui.button(
-        label="Cancel", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="gw_cancel"
-    )
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger,
+                       emoji="🛑", custom_id="gw_cancel")
     async def cancel(self, inter: discord.Interaction, _):
         if not self._admin(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
-
-        chan = self.g.get_channel(self.ch)
-        msg = await chan.fetch_message(self.msg_id)
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value="**CANCELLED**")
-        put_field(e, 3, name="Eligible Entrants", value="Giveaway cancelled.")
-        e.color = discord.Color.red()
-        await msg.edit(embed=e, view=None)
-        self.stop.set()
-        await chan.send("Giveaway cancelled.")
+            return await inter.response.send_message("Not authorised.",
+                                                     ephemeral=True)
+        await self._finish("CANCELLED", discord.Color.red())
         await inter.response.send_message("Cancelled.", ephemeral=True)
-        await db.end_giveaway(self.msg_id)
 
-async def run_giveaway(g, ch_id, msg_id, prize, end_ts, stop):
-    chan = g.get_channel(ch_id)
-    msg = await chan.fetch_message(msg_id)
 
-    while not stop.is_set():
-        rem = end_ts - int(datetime.now(timezone.utc).timestamp())
-        if rem <= 0:
-            break
-
-        txt = "\n".join(m.mention for m in eligible(g)) or "*None yet*"
-        e = msg.embeds[0]
-        put_field(e, 1, name="Time left", value=f"**{fmt_time(rem)}**")
-        put_field(e, 3, name="Eligible Entrants", value=txt)
-        try:
-            await msg.edit(embed=e)
-        except discord.HTTPException:
-            pass
-
-        await asyncio.sleep(min(60, rem))
-
-    if stop.is_set():
+async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
+    """
+    Background task that updates the timer field and, when time is up,
+    announces the winner (unless the giveaway was ended/cancelled manually).
+    """
+    channel = guild.get_channel(ch_id)
+    if not channel:
         return
 
-    pool = eligible(g)
+    try:
+        message = await channel.fetch_message(msg_id)
+    except discord.NotFound:
+        return
+
+    last_display = None  # cache to avoid needless edits
+
+    while not stop.is_set():
+        now = int(datetime.now(timezone.utc).timestamp())
+        remaining = end_ts - now
+        if remaining <= 0:
+            break
+
+        display = fmt_time(remaining)
+        if display != last_display:
+            last_display = display
+            embed = message.embeds[0]
+
+            entrants_txt = "\n".join(m.mention for m in eligible(guild)) or "*None yet*"
+            put_field(embed, 1, name="Time left", value=f"**{display}**")
+            put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
+
+            try:
+                await message.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+
+        # dynamic sleep: 30s (>5 min), 10s (5 min-10 s), 1s (≤10 s)
+        sleep_for = 1 if remaining <= 10 else 10 if remaining <= 300 else 30
+        await asyncio.sleep(sleep_for)
+
+    # ---------- time expired ----------
+    if stop.is_set():            # ended or cancelled manually
+        return
+
+    pool = eligible(guild)
     if pool:
-        await chan.send(
+        winner = choice(pool)
+        await channel.send(
             embed=discord.Embed(
                 title=f"🎉 {prize} – WINNER 🎉",
-                description=f"Congratulations {choice(pool).mention}! You won **{prize}**!",
+                description=f"Congratulations {winner.mention}! You won **{prize}**!",
                 colour=discord.Color.gold(),
             )
         )
     else:
-        await chan.send("No eligible entrants.")
+        await channel.send("No eligible entrants.")
+
     await db.end_giveaway(msg_id)
 
+
 async def resume_giveaways():
-    g = bot.get_guild(GUILD_ID)
-    ch = g.get_channel(GIVEAWAY_CH_ID) if g else None
-    if not g or not ch:
+    """
+    Called in on_ready(): restores any active giveaways saved in the database.
+    """
+    guild = bot.get_guild(GUILD_ID)
+    channel = guild.get_channel(GIVEAWAY_CH_ID) if guild else None
+    if not guild or not channel:
         return
 
-    # Start from DB
     for row in await db.get_active_giveaways():
         stop = asyncio.Event()
         bot.giveaway_stop_events[row['message_id']] = stop
-        v = GiveawayControl(g, row['channel_id'], row['message_id'], row['prize'], stop)
-        bot.add_view(v, message_id=row['message_id'])
-        asyncio.create_task(run_giveaway(
-            g, row['channel_id'], row['message_id'], row['prize'], row['end_ts'], stop
-        ))
+        view = GiveawayControl(guild, row['channel_id'],
+                               row['message_id'], row['prize'], stop)
+        bot.add_view(view, message_id=row['message_id'])
+        asyncio.create_task(
+            run_giveaway(guild, row['channel_id'], row['message_id'],
+                         row['prize'], row['end_ts'], stop)
+        )
 
-# ─────────────────────────  /giveaway command (FIXED)  ─────────────────
+
+# ────────────────────────── /giveaway command ─────────────────────────
 @bot.tree.command(name="giveaway", description="Start a giveaway")
 @app_commands.check(lambda i: i.user.guild_permissions.administrator)
 @app_commands.choices(
@@ -1010,42 +1051,48 @@ async def resume_giveaways():
     ]
 )
 @app_commands.describe(prize="Prize to give away")
-async def giveaway(
-    inter: discord.Interaction, duration: app_commands.Choice[int], prize: str
-):
-    # acknowledge immediately so we don't hit 10062 Unknown interaction
+async def giveaway(inter: discord.Interaction,
+                   duration: app_commands.Choice[int],
+                   prize: str):
+    # acknowledge right away to avoid 3-second limit
     await inter.response.defer(ephemeral=True)
 
-    g    = inter.guild
-    ch   = g.get_channel(GIVEAWAY_CH_ID)
-    role = g.get_role(GIVEAWAY_ROLE_ID)
-    if not ch or not role:
+    guild = inter.guild
+    channel = guild.get_channel(GIVEAWAY_CH_ID)
+    role    = guild.get_role(GIVEAWAY_ROLE_ID)
+    if not channel or not role:
         return await inter.followup.send(
-            "Giveaway channel/role missing.", ephemeral=True
+            "Giveaway channel or role missing.", ephemeral=True
         )
 
     end_ts = int(datetime.now(timezone.utc).timestamp()) + duration.value * 86_400
     stop   = asyncio.Event()
 
-    embed = discord.Embed(title=EMBED_TITLE, colour=discord.Color.blurple())
-    embed.add_field(name="Prize",            value=f"**{prize}**",         inline=False)
-    embed.add_field(name="Time left",        value=f"**{duration.name}**", inline=False)
-    embed.add_field(name="Eligibility",      value=f"Only {role.mention} can win.", inline=False)
-    embed.add_field(name="Eligible Entrants",value="*Updating…*", inline=False)
-    embed.set_footer(text=f"||{FOOTER_END_TAG}{end_ts}|{FOOTER_PRIZE_TAG}{prize}||")
+    embed = discord.Embed(title="🎉 GIVEAWAY 🎉",
+                          colour=discord.Color.blurple())
+    embed.add_field(name="Prize",             value=f"**{prize}**",
+                    inline=False)
+    embed.add_field(name="Time left",         value=f"**{duration.name}**",
+                    inline=False)
+    embed.add_field(name="Eligibility",
+                    value=f"Only {role.mention} can win.",
+                    inline=False)
+    embed.add_field(name="Eligible Entrants", value="*Updating…*",
+                    inline=False)
+    embed.set_footer(text=f"||END:{end_ts}|PRIZE:{prize}||")
 
-    view = GiveawayControl(g, ch.id, 0, prize, stop)
-    msg  = await ch.send(embed=embed, view=view)
-    view.msg_id = view.message_id = msg.id
-    bot.add_view(view, message_id=msg.id)
+    view = GiveawayControl(guild, channel.id, 0, prize, stop)
+    message = await channel.send(embed=embed, view=view)
+    view.msg_id = view.message_id = message.id
+    bot.add_view(view, message_id=message.id)
 
-    await db.add_giveaway(ch.id, msg.id, prize, end_ts)
+    await db.add_giveaway(channel.id, message.id, prize, end_ts)
     asyncio.create_task(
-        run_giveaway(g, ch.id, msg.id, prize, end_ts, stop)
+        run_giveaway(guild, channel.id, message.id, prize, end_ts, stop)
     )
 
     await inter.followup.send(
-        f"Giveaway started in {ch.mention}.", ephemeral=True
+        f"Giveaway started in {channel.mention}.", ephemeral=True
     )
 # ──────────────────────────────────────────────────────────────────────
 
