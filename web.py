@@ -1,4 +1,4 @@
-import os, datetime, asyncpg, httpx, inspect
+import os, datetime, asyncpg, httpx, inspect, asyncio
 from pathlib import Path
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
@@ -6,6 +6,10 @@ from fastapi import FastAPI, Request, Form, Response, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+# ────────────── import the Discord bot module ────────────────
+import ctfobot2_0 as botmod          #  ← make sure the file is ctfobot2_0.py
+BOT_TOKEN = botmod.BOT_TOKEN
 
 # ─────────────────────── Config ───────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -28,7 +32,7 @@ db: asyncpg.Pool | None = None
 
 # ────────────────── DB startup / migration ─────────────
 @app.on_event("startup")
-async def startup():
+async def init_database():
     global db
     db = await asyncpg.create_pool(DATABASE_URL)
     async with db.acquire() as conn:
@@ -44,14 +48,28 @@ async def startup():
             pin TEXT NOT NULL,
             public BOOLEAN NOT NULL DEFAULT FALSE
         );""")
-        # NOTE: member_forms & giveaways tables already created by the bot
+        # member_forms & giveaways are created by the bot on its side
+
+# ─────────────── start / stop the Discord bot ───────────────
+@app.on_event("startup")
+async def launch_discord_bot():
+    # run the bot inside the same event loop
+    asyncio.create_task(botmod.bot.start(BOT_TOKEN))
+
+@app.on_event("shutdown")
+async def stop_discord_bot():
+    await botmod.bot.close()
 
 # ────────────────── Helper to load dashboard data ──────
 async def all_admin_data():
     async with db.acquire() as conn:
         codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
-        forms = await conn.fetch("SELECT * FROM member_forms ORDER BY created_at DESC")
-        gws   = await conn.fetch("SELECT * FROM giveaways ORDER BY end_ts DESC")
+        forms = await conn.fetch(
+            "SELECT * FROM member_forms ORDER BY created_at DESC"
+        )
+        gws   = await conn.fetch(
+            "SELECT * FROM giveaways ORDER BY end_ts DESC"
+        )
     return codes, forms, gws
 
 # ────────────────── Auth helpers (unchanged) ───────────

@@ -1208,4 +1208,6 @@ async def on_ready():
 if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
 
-bot.run(BOT_TOKEN)
+# Only run the bot when this file is executed directly
+if __name__ == "__main__":
+    bot.run(BOT_TOKEN)
