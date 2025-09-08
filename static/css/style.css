@@ -1,4 +1,4 @@
-/* Dark background + neon accents */
+/* CTFO Dark theme & Neon accents */
 :root {
   --bg:   #121212;        /* dark grey */
   --card: #1e1e1e;        /* card surface */
@@ -6,6 +6,18 @@
   /* new accent colours */
   --neon:      #ff2e2e;   /* vibrant red */
   --neon-glow: #ff8c0045; /* translucent orange glow */
+
+  --ctfo-bg:        #0e0e0f;
+  --ctfo-panel:     #1a1a1c;
+  --ctfo-border:    #262629;
+  --ctfo-red:       #ff3030;
+  --ctfo-green:     #2ecc71;
+  --ctfo-amber:     #f1c40f;
+  --ctfo-yellow:    #f1c40f;
+  --ctfo-blue:      #2980b9;
+
+  --bs-body-bg:     var(--ctfo-bg);      /* override bootstrap var */
+  --bs-body-color:  #ddd;
 }
 
 html,body {
@@ -14,6 +26,7 @@ html,body {
   color: #fff;
   font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
 }
+body { background: var(--ctfo-bg); color: var(--bs-body-color); }
 
 /* Navbar --------------------------------------------------- */
 .navbar-brand,
@@ -67,20 +80,7 @@ html,body {
   justify-content: center;
 }
 
-/* ── CTFO Dark theme additions ─────────────────────────────── */
-:root {
-    --ctfo-bg:        #0e0e0f;
-    --ctfo-panel:     #1a1a1c;
-    --ctfo-border:    #262629;
-    --ctfo-red:       #c0392b;
-    --ctfo-green:     #27ae60;
-    --ctfo-amber:     #f39c12;
-    --ctfo-blue:      #2980b9;
-    --bs-body-bg:     var(--ctfo-bg);      /* override bootstrap var */
-    --bs-body-color:  #ddd;
-}
-body { background: var(--ctfo-bg); color: var(--bs-body-color); }
-
+/* Accordion / Panel (member forms) -------------------------- */
 .accordion-item {
     background: var(--ctfo-panel);
     border: 1px solid var(--ctfo-border);
@@ -124,3 +124,59 @@ textarea.form-control {
 
 /* make bottom padding so last item doesn't hug footer */
 #formAcc { padding-bottom: 1rem; }
+
+/* DataTables/Member Forms custom styles --------------------- */
+.table thead{background:#121216;}
+table.dataTable tbody td,
+table.dataTable thead th{color:#fff !important;}
+
+td.details-control{cursor:pointer;text-align:center;width:28px;}
+td.details-control i{color:var(--ctfo-red);filter:drop-shadow(0 0 3px var(--ctfo-red));
+                     transition:transform .25s;}
+tr.shown td.details-control i{transform:rotate(90deg);}
+
+/* status badge (DataTable size) */
+.badge-status{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+              border-radius:50%;font-size:.8rem;}
+.badge-pending {background:var(--ctfo-yellow);}
+.badge-accepted{background:var(--ctfo-green);}
+.badge-denied  {background:var(--ctfo-red);box-shadow:0 0 6px var(--ctfo-red);}
+
+/* buttons for DataTable actions */
+.btn-success{background:var(--ctfo-green);border:0;}        /* green accept */
+.btn-warning{background:var(--ctfo-yellow);border:0;color:#000;}
+.btn-danger {background:var(--ctfo-red);border:0;box-shadow:0 0 6px rgba(255,48,48,.5);}
+.btn:disabled{opacity:.35!important;}
+
+/* DataTables search / length controls */
+.dataTables_wrapper .form-select,
+.dataTables_wrapper .dataTables_filter input{background:#1c1c1f;border:1px solid #444;color:#fff;}
+
+/* child row -----------------------------------------------------*/
+tr.child td{background:transparent;border:0;padding:0 !important;}
+
+.child-panel{
+  width:100%;box-sizing:border-box;
+  background:var(--ctfo-panel);
+  border-left:4px solid var(--ctfo-red);
+  box-shadow:0 0 8px rgba(255,48,48,.6);
+
+  margin-top:10px;                       /* gap reduced to 10 px */
+  padding:1.2rem 1.4rem 1.2rem 70px;     /* indent clears caret+badge */
+}
+.field-card .label{
+  font-size:.72rem;text-transform:uppercase;color:#ccc;letter-spacing:.4px;
+}
+.field-card .label i{color:#ccc;}
+.field-card .value{
+  font-weight:600;color:var(--ctfo-red);text-shadow:0 0 5px var(--ctfo-red);
+  word-break:break-word;
+}
+
+/* Responsive tweaks ------------------------------------------ */
+@media (max-width: 991px){
+  .child-panel .col-lg-3 { flex: 0 0 50%; max-width: 50%; }
+}
+@media (max-width: 575px){
+  .child-panel .col-6, .child-panel .col-lg-3 { flex: 0 0 100%; max-width: 100%; }
+}
