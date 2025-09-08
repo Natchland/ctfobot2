@@ -121,11 +121,11 @@ class Database:
                 user_id    BIGINT,
                 created_at TIMESTAMP DEFAULT now(),
                 data       JSONB,
+                status     TEXT NOT NULL DEFAULT 'pending'
             );
-            
-            -- make sure column exists even on old installations
+
             ALTER TABLE member_forms
-                ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
             """)
             # ── NOTIFY for /codes edits → bot refresh ─────
             await conn.execute("""
