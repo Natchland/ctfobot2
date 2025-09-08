@@ -30,6 +30,40 @@ if static_path.exists():
 
 db: asyncpg.Pool | None = None
 
+# ───────────────── AUTH HELPERS ───────
+async def current_user(request: Request):
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        return None
+    try:
+        username = signer.loads(token)
+    except BadSignature:
+        return None
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT username, approved FROM admins WHERE username=$1",
+            username
+        )
+    return row["username"] if row and row["approved"] else None
+
+
+def login_required(endpoint):
+    """injects `user` into the endpoint or redirects to /login"""
+    sig = inspect.signature(endpoint)
+    exposed = [p for p in sig.parameters.values() if p.name != "user"]
+
+    async def wrapper(*args, **kwargs):
+        request = args[0] if args and isinstance(args[0], Request) else kwargs["request"]
+        user = await current_user(request)
+        if not user:
+            return RedirectResponse("/login", status_code=303)
+        kwargs.pop("request", None)
+        return await endpoint(request, user, *args[1:], **kwargs)
+
+    wrapper.__signature__ = inspect.Signature(parameters=exposed)
+    wrapper.__name__ = endpoint.__name__
+    return wrapper
+
 # ────────────────── DB startup / migration ─────────────
 @app.on_event("startup")
 async def init_database():
@@ -71,11 +105,6 @@ async def all_admin_data():
             "SELECT * FROM giveaways ORDER BY end_ts DESC"
         )
     return codes, forms, gws
-
-# ────────────────── Auth helpers (unchanged) ───────────
-#       current_user(), login_required()  …  etc.
-#       Signup / login / logout endpoints remain as you had them
-# --------------------------------------------------------------------
 
 # ────────────────── Admin dashboard ─────────────────────
 @app.get("/admin", response_class=HTMLResponse)
