@@ -4,61 +4,7 @@
 {% block extra_head %}
 <!-- DataTables (Bootstrap 5 theme) -->
 <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css">
-<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
-<script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
-<!-- FontAwesome 6 -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-
-<style>
-/* DataTables/Member Forms custom styles */
-.table thead{background:#121216;}
-table.dataTable tbody td,
-table.dataTable thead th{color:#fff !important;}
-
-td.details-control{cursor:pointer;text-align:center;width:28px;}
-td.details-control i{color:var(--ctfo-red);filter:drop-shadow(0 0 3px var(--ctfo-red));
-                     transition:transform .25s;}
-tr.shown td.details-control i{transform:rotate(90deg);}
-
-/* status badge */
-.badge-status{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
-              border-radius:50%;font-size:.8rem;}
-.badge-pending {background:var(--ctfo-yellow);}
-.badge-accepted{background:var(--ctfo-green);}
-.badge-denied  {background:var(--ctfo-red);box-shadow:0 0 6px var(--ctfo-red);}
-
-/* buttons */
-.btn-success{background:var(--ctfo-green);border:0;}
-.btn-warning{background:var(--ctfo-yellow);border:0;color:#000;}
-.btn-danger {background:var(--ctfo-red);border:0;box-shadow:0 0 6px rgba(255,48,48,.5);}
-.btn:disabled{opacity:.35!important;}
-
-/* DataTables search / length controls */
-.dataTables_wrapper .form-select,
-.dataTables_wrapper .dataTables_filter input{background:#1c1c1f;border:1px solid #444;color:#fff;}
-
-/* child row -----------------------------------------------------*/
-tr.child td{background:transparent;border:0;padding:0 !important;}
-
-.child-panel{
-  width:100%;box-sizing:border-box;
-  background:var(--ctfo-panel);
-  border-left:4px solid var(--ctfo-red);
-  box-shadow:0 0 8px rgba(255,48,48,.6);
-
-  margin-top:10px;                       /* gap reduced to 10 px */
-  padding:1.2rem 1.4rem 1.2rem 70px;     /* indent clears caret+badge */
-}
-.field-card .label{
-  font-size:.72rem;text-transform:uppercase;color:#ccc;letter-spacing:.4px;
-}
-.field-card .label i{color:#ccc;}
-.field-card .value{
-  font-weight:600;color:var(--ctfo-red);text-shadow:0 0 5px var(--ctfo-red);
-  word-break:break-word;
-}
-</style>
 {% endblock %}
 
 {% block content %}
@@ -81,19 +27,19 @@ tr.child td{background:transparent;border:0;padding:0 !important;}
 
     <!-- MEMBER FORMS: DataTable -->
     <div class="tab-pane fade" id="forms">
-      {% if forms %}
-        <table id="formsTable" class="table table-striped align-middle w-100">
-          <thead>
-            <tr>
-              <th></th>
-              <th>Status</th>
-              <th>ID</th>
-              <th>User&nbsp;ID</th>
-              <th>Created</th>
-              <th style="width:110px;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
+      <table id="formsTable" class="table table-striped align-middle w-100">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Status</th>
+            <th>ID</th>
+            <th>User&nbsp;ID</th>
+            <th>Created</th>
+            <th style="width:110px;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if forms %}
             {% for f in forms %}
               {% set badge =
                 'badge-pending'  if f.status=='pending' else
@@ -110,7 +56,13 @@ tr.child td{background:transparent;border:0;padding:0 !important;}
                 </td>
                 <td>{{f.id}}</td>
                 <td>{{f.user_id}}</td>
-                <td>{{f.created_at.strftime('%Y-%m-%d %H:%M')}}</td>
+                <td>
+                  {% if f.created_at %}
+                    {{ f.created_at.strftime('%Y-%m-%d %H:%M') }}
+                  {% else %}
+                    N/A
+                  {% endif %}
+                </td>
                 <td class="d-flex gap-1">
                   <form method="post" action="/forms/accept" style="display:inline;">
                     <input type="hidden" name="id" value="{{f.id}}">
@@ -131,14 +83,14 @@ tr.child td{background:transparent;border:0;padding:0 !important;}
                 </td>
               </tr>
             {% endfor %}
-          </tbody>
-        </table>
-      {% else %}
-        <div class="alert alert-secondary text-center">
-          No member forms stored.
-        </div>
-      {% endif %}
-    </div><!-- /.tab-pane -->
+          {% else %}
+            <tr>
+              <td colspan="6" class="text-center text-muted">No member forms stored.</td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
 
     <!-- GIVEAWAYS -->
     <div class="tab-pane fade" id="giveaways">
@@ -175,7 +127,6 @@ tr.child td{background:transparent;border:0;padding:0 !important;}
         <div class="alert alert-info">No giveaways yet.</div>
       {% endif %}
     </div>
-
   </div><!-- /.tab-content -->
 
   <footer class="text-muted text-center mt-5">&copy; {{ year }} CTFO Gaming</footer>
@@ -183,6 +134,12 @@ tr.child td{background:transparent;border:0;padding:0 !important;}
 {% endblock %}
 
 {% block extra_js %}
+<!-- DataTables/FontAwesome JS and child row logic -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/js/all.min.js"></script>
 <script>
 const ICON = {
   age      :['fa-calendar',    'Age'],

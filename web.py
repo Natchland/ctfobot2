@@ -1,4 +1,4 @@
-import os, datetime, asyncpg, httpx, inspect, asyncio
+import os, datetime, asyncpg, httpx, inspect, asyncio, json
 from pathlib import Path
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
@@ -8,11 +8,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import discord
 
-# ────────────── import the Discord bot module ────────────────
-import ctfobot2_0 as botmod          #  ← make sure the file is ctfobot2_0.py
+import ctfobot2_0 as botmod
 BOT_TOKEN = botmod.BOT_TOKEN
 
-# ─────────────────────── Config ───────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")
 OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")
@@ -21,7 +19,6 @@ COOKIE_NAME  = "ctfo_admin"
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 signer  = URLSafeSerializer(WEB_SECRET)
 
-# ────────────────────── FastAPI ───────────────────────
 app       = FastAPI(debug=False)
 templates = Jinja2Templates(directory="templates")
 
@@ -31,7 +28,6 @@ if static_path.exists():
 
 db: asyncpg.Pool | None = None
 
-# ───────────────── AUTH HELPERS ───────
 async def current_user(request: Request):
     token = request.cookies.get(COOKIE_NAME)
     if not token:
@@ -47,9 +43,7 @@ async def current_user(request: Request):
         )
     return row["username"] if row and row["approved"] else None
 
-
 def login_required(endpoint):
-    """injects `user` into the endpoint or redirects to /login"""
     sig = inspect.signature(endpoint)
     exposed = [p for p in sig.parameters.values() if p.name != "user"]
 
@@ -65,7 +59,6 @@ def login_required(endpoint):
     wrapper.__name__ = endpoint.__name__
     return wrapper
 
-# ────────────────── DB startup / migration ─────────────
 @app.on_event("startup")
 async def init_database():
     global db
@@ -85,17 +78,14 @@ async def init_database():
         );""")
         # member_forms & giveaways are created by the bot on its side
 
-# ─────────────── start / stop the Discord bot ───────────────
 @app.on_event("startup")
 async def launch_discord_bot():
-    # run the bot inside the same event loop
     asyncio.create_task(botmod.bot.start(BOT_TOKEN))
 
 @app.on_event("shutdown")
 async def stop_discord_bot():
     await botmod.bot.close()
 
-# ────────────────── Helper to load dashboard data ──────
 async def all_admin_data():
     async with db.acquire() as conn:
         codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
@@ -105,9 +95,15 @@ async def all_admin_data():
         gws   = await conn.fetch(
             "SELECT * FROM giveaways ORDER BY end_ts DESC"
         )
+    # --- FIX: Ensure forms' data is always a dict ---
+    for f in forms:
+        if isinstance(f["data"], str):
+            try:
+                f["data"] = json.loads(f["data"])
+            except Exception:
+                f["data"] = {}
     return codes, forms, gws
 
-# ────────────────── Admin dashboard ─────────────────────
 @app.get("/admin", response_class=HTMLResponse)
 @login_required
 async def admin_panel(request: Request, user: str):
@@ -123,30 +119,22 @@ async def admin_panel(request: Request, user: str):
             "year":  datetime.datetime.now().year,
         },
     )
-# ───────────────── MEMBER-FORMS ─────────────────────────────
-import json
-import asyncio
-import discord
 
-from fastapi import Request, Form, HTTPException
-from fastapi.responses import RedirectResponse
-# ---------- UPDATE ------------------------------------------------------
+# --- MEMBER-FORMS (no changes needed here for dropdown to work) ---
 @app.post("/forms/update")
 @login_required
 async def update_form(
     request: Request,
     user: str,
     id: int = Form(...),
-    json_text: str = Form(..., alias="json"),   # textarea name="json"
+    json_text: str = Form(..., alias="json"),
 ):
-    """Write the edited JSON back as proper JSONB (dict)"""
     try:
         parsed = json.loads(json_text)
     except json.JSONDecodeError:
         raise HTTPException(400, "Not valid JSON.")
 
     async with db.acquire() as conn:
-        # pass a Python dict → asyncpg stores it as real jsonb
         await conn.execute(
             "UPDATE member_forms SET data=$2 WHERE id=$1",
             id,
@@ -154,8 +142,6 @@ async def update_form(
         )
     return RedirectResponse("/admin#forms", status_code=303)
 
-
-# ---------- ACCEPT ------------------------------------------------------
 @app.post("/forms/accept")
 @login_required
 async def accept_member(
@@ -188,7 +174,6 @@ async def accept_member(
     except discord.NotFound:
         raise HTTPException(404, "User left the guild")
 
-    # roles
     roles = []
     get_r = guild.get_role
     if (r := get_r(botmod.ACCEPT_ROLE_ID)): roles.append(r)
@@ -207,8 +192,6 @@ async def accept_member(
 
     return RedirectResponse("/admin#forms", status_code=303)
 
-
-# ---------- DENY  (7-day temp ban) --------------------------------------
 @app.post("/forms/deny")
 @login_required
 async def deny_member(
@@ -230,7 +213,6 @@ async def deny_member(
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
 
-    # BOT MUST have "Ban Members" and be higher than applicant!
     await guild.ban(
         discord.Object(id=uid),
         reason=f"Application denied via web panel by {user} (temp-ban)",
@@ -254,8 +236,6 @@ async def deny_member(
 
     return RedirectResponse("/admin#forms", status_code=303)
 
-
-# ---------- DELETE ------------------------------------------------------
 @app.post("/forms/delete")
 @login_required
 async def delete_form(
