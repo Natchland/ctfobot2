@@ -2,7 +2,6 @@
 {% block title %}Admin Panel | CTFO{% endblock %}
 
 {% block extra_head %}
-<!-- DataTables (Bootstrap 5 theme) -->
 <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 {% endblock %}
@@ -17,7 +16,6 @@
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#giveaways">Giveaways</button></li>
   </ul>
 
-  <!-- Tab panes -->
   <div class="tab-content">
 
     <!-- CODES -->
@@ -64,22 +62,17 @@
                   {% endif %}
                 </td>
                 <td class="d-flex gap-1">
-                  <form method="post" action="/forms/accept" style="display:inline;">
-                    <input type="hidden" name="id" value="{{f.id}}">
-                    <button class="btn btn-sm btn-success" {% if f.status!='pending' %}disabled{% endif %}>
-                      <i class="fa fa-check"></i>
-                    </button>
-                  </form>
-                  <form method="post" action="/forms/deny" style="display:inline;">
-                    <input type="hidden" name="id" value="{{f.id}}">
-                    <button class="btn btn-sm btn-warning" {% if f.status!='pending' %}disabled{% endif %}>
-                      <i class="fa fa-ban"></i>
-                    </button>
-                  </form>
-                  <form method="post" action="/forms/delete" style="display:inline;">
-                    <input type="hidden" name="id" value="{{f.id}}">
-                    <button class="btn btn-sm btn-danger"><i class="fa fa-trash"></i></button>
-                  </form>
+                  <button class="btn btn-sm btn-success action-btn" data-id="{{f.id}}" data-action="accept"
+                    {% if f.status!='pending' %}disabled{% endif %}>
+                    <i class="fa fa-check"></i>
+                  </button>
+                  <button class="btn btn-sm btn-warning action-btn" data-id="{{f.id}}" data-action="deny"
+                    {% if f.status!='pending' %}disabled{% endif %}>
+                    <i class="fa fa-ban"></i>
+                  </button>
+                  <button class="btn btn-sm btn-danger action-btn" data-id="{{f.id}}" data-action="delete">
+                    <i class="fa fa-trash"></i>
+                  </button>
                 </td>
               </tr>
             {% endfor %}
@@ -127,14 +120,13 @@
         <div class="alert alert-info">No giveaways yet.</div>
       {% endif %}
     </div>
-  </div><!-- /.tab-content -->
+  </div>
 
   <footer class="text-muted text-center mt-5">&copy; {{ year }} CTFO Gaming</footer>
 </section>
 {% endblock %}
 
 {% block extra_js %}
-<!-- DataTables/FontAwesome JS and child row logic -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
@@ -186,6 +178,43 @@ $(function() {
      row.child.isShown()
        ? (row.child.hide(), tr.removeClass('shown'))
        : (row.child(makeChild(formData)).show(), tr.addClass('shown'));
+  });
+
+  // AJAX actions for Accept/Deny/Delete
+  $('#formsTable').on('click', '.action-btn', function() {
+    const id = $(this).data('id');
+    const action = $(this).data('action');
+    if(!id || !action) return;
+    let url = `/forms/${action}`;
+    let btn = $(this);
+    btn.prop('disabled', true);
+
+    $.post(url, {id: id})
+      .done(function(resp) {
+        const row = btn.closest('tr');
+        if(action === 'delete') {
+          table.row(row).remove().draw();
+        } else if(resp && resp.status) {
+          // Update badge
+          let badgeCell = row.find('td').eq(1).find('.badge-status');
+          if(action === 'accept') {
+            badgeCell.removeClass().addClass('badge-status badge-accepted').html('<i class="fa fa-check"></i>');
+          } else if(action === 'deny') {
+            badgeCell.removeClass().addClass('badge-status badge-denied').html('<i class="fa fa-ban"></i>');
+          }
+          // Disable all except delete button
+          row.find('.action-btn').not('[data-action="delete"]').prop('disabled', true);
+        } else if(resp && resp.error) {
+          alert(resp.error);
+          btn.prop('disabled', false);
+        }
+      })
+      .fail(function(xhr) {
+        let msg = "Error processing action.";
+        if(xhr.responseJSON && xhr.responseJSON.error) msg = xhr.responseJSON.error;
+        alert(msg);
+        btn.prop('disabled', false);
+      });
   });
 });
 </script>

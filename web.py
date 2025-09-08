@@ -3,7 +3,7 @@ from pathlib import Path
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
 from fastapi import FastAPI, Request, Form, Response, HTTPException
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import discord
@@ -91,7 +91,7 @@ async def all_admin_data():
         codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
         forms = await conn.fetch("SELECT * FROM member_forms ORDER BY created_at DESC")
         gws   = await conn.fetch("SELECT * FROM giveaways ORDER BY end_ts DESC")
-    # Convert each Record to dict and parse data
+    # Convert to dict and parse data
     forms2 = []
     for rec in forms:
         f = dict(rec)
@@ -119,7 +119,6 @@ async def admin_panel(request: Request, user: str):
         },
     )
 
-# --- MEMBER-FORMS (no changes needed here for dropdown to work) ---
 @app.post("/forms/update")
 @login_required
 async def update_form(
@@ -139,15 +138,11 @@ async def update_form(
             id,
             parsed,
         )
-    return RedirectResponse("/admin#forms", status_code=303)
+    return JSONResponse({"status": "updated"})
 
 @app.post("/forms/accept")
 @login_required
-async def accept_member(
-    request: Request,
-    user: str,
-    id: int = Form(...),
-):
+async def accept_member(request: Request, user: str, id: int = Form(...)):
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT user_id, data, status FROM member_forms WHERE id=$1",
@@ -155,7 +150,7 @@ async def accept_member(
         )
 
     if not row or row["status"] != "pending":
-        raise HTTPException(400, "Form not found or already handled")
+        return JSONResponse({"error": "Form not found or already handled"}, status_code=400)
 
     data: dict = (
         json.loads(row["data"])
@@ -166,12 +161,12 @@ async def accept_member(
 
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
     if not guild:
-        raise HTTPException(503, "Discord bot not ready")
+        return JSONResponse({"error": "Discord bot not ready"}, status_code=503)
 
     try:
         member = await guild.fetch_member(uid)
     except discord.NotFound:
-        raise HTTPException(404, "User left the guild")
+        return JSONResponse({"error": "User left the guild"}, status_code=404)
 
     roles = []
     get_r = guild.get_role
@@ -179,7 +174,7 @@ async def accept_member(
     if (r := get_r(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))): roles.append(r)
     if (r := get_r(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):  roles.append(r)
     if not roles:
-        raise HTTPException(500, "Required roles missing")
+        return JSONResponse({"error": "Required roles missing"}, status_code=500)
 
     await member.add_roles(*roles, reason=f"Accepted via web panel by {user}")
 
@@ -189,15 +184,11 @@ async def accept_member(
             id,
         )
 
-    return RedirectResponse("/admin#forms", status_code=303)
+    return JSONResponse({"status": "accepted"})
 
 @app.post("/forms/deny")
 @login_required
-async def deny_member(
-    request: Request,
-    user: str,
-    id: int = Form(...),
-):
+async def deny_member(request: Request, user: str, id: int = Form(...)):
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT user_id, status FROM member_forms WHERE id=$1",
@@ -205,12 +196,12 @@ async def deny_member(
         )
 
     if not row or row["status"] != "pending":
-        raise HTTPException(400, "Form not found or already handled")
+        return JSONResponse({"error": "Form not found or already handled"}, status_code=400)
 
     uid: int = row["user_id"]
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
     if not guild:
-        raise HTTPException(503, "Discord bot not ready")
+        return JSONResponse({"error": "Discord bot not ready"}, status_code=503)
 
     await guild.ban(
         discord.Object(id=uid),
@@ -233,18 +224,14 @@ async def deny_member(
             id,
         )
 
-    return RedirectResponse("/admin#forms", status_code=303)
+    return JSONResponse({"status": "denied"})
 
 @app.post("/forms/delete")
 @login_required
-async def delete_form(
-    request: Request,
-    user: str,
-    id: int = Form(...),
-):
+async def delete_form(request: Request, user: str, id: int = Form(...)):
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM member_forms WHERE id=$1", id)
-    return RedirectResponse("/admin#forms", status_code=303)
+    return JSONResponse({"status": "deleted"})
 
 # ═══════════════ GIVEAWAYS   (NEW) ══════════════════════
 @app.post("/giveaways/update")
