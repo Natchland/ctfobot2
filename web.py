@@ -136,23 +136,22 @@ from fastapi.responses import RedirectResponse
 async def update_form(
     request: Request,
     user: str,
-    id: int  = Form(...),
-    json_: str = Form(..., alias="json"),   # template still sends  name="json"
+    id: int = Form(...),
+    json_text: str = Form(..., alias="json"),   # textarea name="json"
 ):
-    """Save manual edits to the stored JSON blob."""
+    """Write the edited JSON back as proper JSONB (dict)"""
     try:
-        # validate JSON first
-        json.loads(json_)
-    except Exception:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
         raise HTTPException(400, "Not valid JSON.")
 
     async with db.acquire() as conn:
+        # pass a Python dict → asyncpg stores it as real jsonb
         await conn.execute(
             "UPDATE member_forms SET data=$2 WHERE id=$1",
             id,
-            json_,
+            parsed,
         )
-
     return RedirectResponse("/admin#forms", status_code=303)
 
 
@@ -164,7 +163,6 @@ async def accept_member(
     user: str,
     id: int = Form(...),
 ):
-    """Grant roles to the applicant and mark the form as accepted."""
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT user_id, data, status FROM member_forms WHERE id=$1",
@@ -174,7 +172,11 @@ async def accept_member(
     if not row or row["status"] != "pending":
         raise HTTPException(400, "Form not found or already handled")
 
-    data = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+    data: dict = (
+        json.loads(row["data"])
+        if isinstance(row["data"], str)
+        else row["data"]
+    )
     uid: int = row["user_id"]
 
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
@@ -186,17 +188,14 @@ async def accept_member(
     except discord.NotFound:
         raise HTTPException(404, "User left the guild")
 
-    roles: list[discord.Role] = []
+    # roles
+    roles = []
     get_r = guild.get_role
-    if (r := get_r(botmod.ACCEPT_ROLE_ID)):
-        roles.append(r)
-    if (r := get_r(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))):
-        roles.append(r)
-    if (r := get_r(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):
-        roles.append(r)
-
+    if (r := get_r(botmod.ACCEPT_ROLE_ID)): roles.append(r)
+    if (r := get_r(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))): roles.append(r)
+    if (r := get_r(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):  roles.append(r)
     if not roles:
-        raise HTTPException(500, "Missing Discord roles")
+        raise HTTPException(500, "Required roles missing")
 
     await member.add_roles(*roles, reason=f"Accepted via web panel by {user}")
 
@@ -209,7 +208,7 @@ async def accept_member(
     return RedirectResponse("/admin#forms", status_code=303)
 
 
-# ---------- DENY  (7-day temp-ban) --------------------------------------
+# ---------- DENY  (7-day temp ban) --------------------------------------
 @app.post("/forms/deny")
 @login_required
 async def deny_member(
@@ -217,7 +216,6 @@ async def deny_member(
     user: str,
     id: int = Form(...),
 ):
-    """Temp-ban the applicant for 7 days and mark the form as denied."""
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT user_id, status FROM member_forms WHERE id=$1",
@@ -228,24 +226,21 @@ async def deny_member(
         raise HTTPException(400, "Form not found or already handled")
 
     uid: int = row["user_id"]
-
     guild = botmod.bot.get_guild(botmod.GUILD_ID)
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
 
+    # BOT MUST have "Ban Members" and be higher than applicant!
     await guild.ban(
         discord.Object(id=uid),
         reason=f"Application denied via web panel by {user} (temp-ban)",
         delete_message_seconds=0,
     )
 
-    async def unban_later() -> None:
+    async def unban_later():
         await asyncio.sleep(botmod.TEMP_BAN_SECONDS)
         try:
-            await guild.unban(
-                discord.Object(id=uid),
-                reason="Temp ban expired (auto-unban)",
-            )
+            await guild.unban(discord.Object(id=uid), reason="Temp ban expired")
         except discord.HTTPException:
             pass
 
@@ -260,7 +255,7 @@ async def deny_member(
     return RedirectResponse("/admin#forms", status_code=303)
 
 
-# ---------- DELETE (optional) -------------------------------------------
+# ---------- DELETE ------------------------------------------------------
 @app.post("/forms/delete")
 @login_required
 async def delete_form(
@@ -268,10 +263,8 @@ async def delete_form(
     user: str,
     id: int = Form(...),
 ):
-    """Permanently delete the record (use with care)."""
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM member_forms WHERE id=$1", id)
-
     return RedirectResponse("/admin#forms", status_code=303)
 
 # ═══════════════ GIVEAWAYS   (NEW) ══════════════════════
