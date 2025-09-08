@@ -129,20 +129,23 @@ async def admin_panel(request: Request, user: str):
 # ═══════════════ MEMBER-FORMS  (NEW) ════════════════════
 @app.post("/forms/update")
 @login_required
-async def update_form(request: Request, user: str,
-                      id: int = Form(...), json: str = Form(...)):
+async def update_form(
+    request: Request, user: str,
+    id:   int  = Form(...),
+    data: str  = Form(..., alias="json")   # <-- browser still sends “json”
+):
+    # validate
     import json as _j
-    try: _j.loads(json)
-    except Exception: raise HTTPException(400, "Not valid JSON.")
-    async with db.acquire() as conn:
-        await conn.execute("UPDATE member_forms SET data=$2 WHERE id=$1", id, json)
-    return RedirectResponse("/admin#forms", status_code=303)
+    try:
+        _j.loads(data)
+    except Exception:
+        raise HTTPException(400, "Not valid JSON.")
 
-@app.post("/forms/delete")
-@login_required
-async def delete_form(request: Request, user: str, id: int = Form(...)):
     async with db.acquire() as conn:
-        await conn.execute("DELETE FROM member_forms WHERE id=$1", id)
+        await conn.execute(
+            "UPDATE member_forms SET data=$2 WHERE id=$1",
+            id, data
+        )
     return RedirectResponse("/admin#forms", status_code=303)
 
 # ═══════════════ GIVEAWAYS   (NEW) ══════════════════════
