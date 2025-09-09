@@ -436,7 +436,7 @@ async def on_voice_state_update(member, before, after):
     ):
         await mark_active(member)
 
-@tasks.loop(minutes=1)
+@tasks.loop(hours=24)
 async def activity_maintenance() -> None:
     """
     Runs once per day.
