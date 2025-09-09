@@ -8,7 +8,7 @@ from typing import Dict, Any
 
 import discord, asyncpg
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 # ══════════════════════════════════════════════════════════════════════
 #                             CONFIGURATION
@@ -16,6 +16,7 @@ from discord.ext import commands
 BOT_TOKEN      = os.getenv("BOT_TOKEN")
 DATABASE_URL   = os.getenv("DATABASE_URL")
 GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
+ACTIVE_MEMBER_ROLE_ID = 1403337937722019931
 
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1413672763108888636
@@ -390,21 +391,35 @@ async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
 
 # ═══════════════════════════  ACTIVITY TRACKER  ═══════════════════════
 async def mark_active(member: discord.Member):
+    """Record activity for a member and handle auto-promotion."""
     if member.bot:
         return
+
     today = date.today()
     rec = await db.get_activity(member.id)
-    if not rec:
+
+    if not rec:                                         # first-ever activity
         streak, warned = 1, False
     else:
-        if rec["date"] != today:
+        if rec["date"] != today:                        # new calendar day
             yesterday = rec["date"] + timedelta(days=1)
             streak = rec["streak"] + 1 if yesterday == today else 1
-            warned = False
-        else:
+            warned = False                              # clear warning flag
+        else:                                           # same day, no change
             streak, warned = rec["streak"], rec["warned"]
+
     await db.set_activity(member.id, streak, today, warned,
                           datetime.now(timezone.utc))
+
+    # ───────── PROMOTION ─────────
+    if streak >= PROMOTE_STREAK:
+        role = member.guild.get_role(ACTIVE_MEMBER_ROLE_ID)
+        if role and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Reached activity streak")
+                print(f"[PROMOTE] {member} promoted (streak {streak})")
+            except discord.Forbidden:
+                print(f"[PROMOTE] Missing perms to add role to {member}")
 
 @bot.event
 async def on_message(m: discord.Message):
@@ -420,6 +435,46 @@ async def on_voice_state_update(member, before, after):
         and after.channel
     ):
         await mark_active(member)
+
+@tasks.loop(hours=24)
+async def activity_maintenance():
+    """Runs once a day: warn, demote, and reset streaks as needed."""
+    await bot.wait_until_ready()
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+
+    today = date.today()
+    role  = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
+    warn_ch = guild.get_channel(WARNING_CH_ID)
+
+    records = await db.get_all_activity()
+    for uid, rec in records.items():
+        member = guild.get_member(uid)
+        if not member:
+            continue
+
+        days_idle = (today - rec["date"]).days
+        warned    = rec["warned"]
+
+        # ---- warn before removal ----
+        if days_idle == WARN_BEFORE_DAYS and role in member.roles and not warned:
+            if warn_ch:
+                await warn_ch.send(
+                    f"{member.mention} You’ve been inactive for "
+                    f"{days_idle} days – please say hi or you’ll lose your role."
+                )
+            await db.set_activity(uid, rec["streak"], rec["date"], True, rec["last"])
+
+        # ---- remove role after full inactivity period ----
+        if days_idle >= INACTIVE_AFTER_DAYS and role in member.roles:
+            try:
+                await member.remove_roles(role, reason="Inactive > 5 days")
+                print(f"[DEMOTE] {member} – inactive {days_idle} days")
+            except discord.Forbidden:
+                print(f"[DEMOTE] No perms to remove role from {member}")
+            # reset streak & warned flag
+            await db.set_activity(uid, 0, rec["date"], False, rec["last"])
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
@@ -1205,6 +1260,9 @@ async def on_ready():
     # start the LISTEN codes_changed background task
     bot.loop.create_task(listen_for_code_changes())
     bot.loop.create_task(listen_for_giveaway_changes())
+
+    if not activity_maintenance.is_running():
+        activity_maintenance.start()
 
     print("Giveaways resumed – code-listener running")
 
