@@ -436,7 +436,7 @@ async def on_voice_state_update(member, before, after):
     ):
         await mark_active(member)
 
-@tasks.loop(hours=24)
+@tasks.loop(minutes=1)
 async def activity_maintenance():
     """Runs once a day: warn, demote, and reset streaks as needed."""
     await bot.wait_until_ready()
