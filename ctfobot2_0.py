@@ -323,38 +323,58 @@ def build_codes_embed(codes: dict[str, tuple[str, bool]]) -> discord.Embed:
     return e
 
 
-async def update_codes_message(bot: commands.Bot, codes: dict):
+async def update_codes_message(bot: commands.Bot, codes: dict) -> None:
     """
-    Always EDIT a single persistent message in the codes channel.
-    The message id is saved to /data/codes_msg_id.txt.
+    Keep exactly ONE "🔑 Access Codes" embed in the codes channel.
+    If it exists, edit it; otherwise create it and remember the ID.
     """
-    channel = bot.get_channel(CODES_CH_ID)
-    if not channel:
-        print("Codes channel not found!")
+    channel: discord.TextChannel | None = bot.get_channel(CODES_CH_ID)
+    if channel is None:
+        print("[codes] codes channel not found!")
         return
 
-    store = "/data/codes_msg_id.txt"
+    store_path = "/data/codes_msg_id.txt"
     msg_id: int | None = None
-    if os.path.exists(store):
+
+    # ---------- 1) try stored ID ----------
+    if os.path.exists(store_path):
         try:
-            msg_id = int(open(store).read().strip())
-        except Exception:
-            msg_id = None
+            msg_id = int(open(store_path, "r").read().strip())
+            msg = await channel.fetch_message(msg_id)
+        except (ValueError, discord.NotFound):
+            msg = None
+    else:
+        msg = None
+
+    # ---------- 2) search history if needed ----------
+    if msg is None:
+        async for m in channel.history(limit=100):
+            if (
+                m.author == bot.user                     # by this bot
+                and m.embeds
+                and m.embeds[0].title
+                and m.embeds[0].title.startswith("🔑 Access Codes")
+            ):
+                msg = m
+                msg_id = m.id
+                # rewrite the cache file so next time we fetch directly
+                os.makedirs("/data", exist_ok=True)
+                with open(store_path, "w") as fp:
+                    fp.write(str(msg_id))
+                break
 
     embed = build_codes_embed(codes)
 
-    if msg_id:
-        try:
-            msg = await channel.fetch_message(msg_id)
-            await msg.edit(embed=embed)
-            return
-        except discord.NotFound:
-            pass            # message deleted – fall through and send a new one.
+    # ---------- 3) edit existing or send new ----------
+    if msg:
+        await msg.edit(embed=embed)
+    else:
+        msg = await channel.send(embed=embed)
+        os.makedirs("/data", exist_ok=True)
+        with open(store_path, "w") as fp:
+            fp.write(str(msg.id))
 
-    msg = await channel.send(embed=embed)
-    os.makedirs("/data", exist_ok=True)
-    with open(store, "w") as fp:
-        fp.write(str(msg.id))
+    print(f"[codes] embed updated (message id {msg.id})")
 
 # ──────────────────────────────────────────────────────────────────────
 #  Background listener – refresh codes embed when DB sends NOTIFY
