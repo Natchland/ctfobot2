@@ -44,7 +44,7 @@ CODES_CH_ID         = 1398667158237483138
 EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
 FOOTER_END_TAG      = "END:"
 FOOTER_PRIZE_TAG    = "PRIZE:"
-PROMOTE_STREAK      = 2
+PROMOTE_STREAK      = 3
 INACTIVE_AFTER_DAYS = 5
 WARN_BEFORE_DAYS    = INACTIVE_AFTER_DAYS - 1
 
@@ -437,44 +437,75 @@ async def on_voice_state_update(member, before, after):
         await mark_active(member)
 
 @tasks.loop(minutes=1)
-async def activity_maintenance():
-    """Runs once a day: warn, demote, and reset streaks as needed."""
+async def activity_maintenance() -> None:
+    """
+    Runs once per day.
+    1. Grants the Active-Member role to users whose streak is high enough.
+    2. Sends a warning message if they are about to lose the role.
+    3. Removes the role after prolonged inactivity.
+    """
     await bot.wait_until_ready()
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
+
+    guild   = bot.get_guild(GUILD_ID)
+    role    = guild.get_role(ACTIVE_MEMBER_ROLE_ID) if guild else None
+    warn_ch = guild.get_channel(WARNING_CH_ID) if guild else None
+    today   = date.today()
+
+    if not guild or not role:
+        print("[activity] Guild or role not found — skipping cycle")
         return
 
-    today = date.today()
-    role  = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
-    warn_ch = guild.get_channel(WARNING_CH_ID)
+    records = await db.get_all_activity()           # {uid: dict}
+    promoted = demoted = warned_n = 0
 
-    records = await db.get_all_activity()
     for uid, rec in records.items():
         member = guild.get_member(uid)
-        if not member:
+        if not member or member.bot:
             continue
 
-        days_idle = (today - rec["date"]).days
-        warned    = rec["warned"]
+        # ---- 1) PROMOTE IF STREAK MET --------------------------------
+        if rec["streak"] >= PROMOTE_STREAK and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Reached activity streak (cron)")
+                promoted += 1
+                print(f"[PROMOTE] {member} (streak {rec['streak']})")
+            except discord.Forbidden:
+                print(f"[PROMOTE] Missing perms for {member}")
 
-        # ---- warn before removal ----
-        if days_idle == WARN_BEFORE_DAYS and role in member.roles and not warned:
+        # ---- compute inactivity --------------------------------------
+        days_idle = (today - rec["date"]).days
+        already_warned = rec["warned"]
+
+        # ---- 2) SEND WARNING ----------------------------------------
+        if (
+            days_idle == WARN_BEFORE_DAYS
+            and role in member.roles
+            and not already_warned
+        ):
             if warn_ch:
                 await warn_ch.send(
                     f"{member.mention} You’ve been inactive for "
-                    f"{days_idle} days – please say hi or you’ll lose your role."
+                    f"{days_idle} days – please pop in or you’ll lose your role."
                 )
-            await db.set_activity(uid, rec["streak"], rec["date"], True, rec["last"])
+            await db.set_activity(
+                uid, rec["streak"], rec["date"], True, rec["last"]
+            )
+            warned_n += 1
 
-        # ---- remove role after full inactivity period ----
+        # ---- 3) DEMOTE ----------------------------------------------
         if days_idle >= INACTIVE_AFTER_DAYS and role in member.roles:
             try:
                 await member.remove_roles(role, reason="Inactive > 5 days")
+                demoted += 1
                 print(f"[DEMOTE] {member} – inactive {days_idle} days")
             except discord.Forbidden:
-                print(f"[DEMOTE] No perms to remove role from {member}")
-            # reset streak & warned flag
+                print(f"[DEMOTE] Missing perms for {member}")
             await db.set_activity(uid, 0, rec["date"], False, rec["last"])
+
+    print(
+        f"[activity] cycle complete: +{promoted} promoted, "
+        f"{warned_n} warned, –{demoted} demoted"
+    )
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
