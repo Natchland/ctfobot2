@@ -21,6 +21,8 @@ ACTIVE_MEMBER_ROLE_ID = 1403337937722019931
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1378118620873494548
 WARNING_CH_ID  = 1398657081338237028
+WELCOME_CHANNEL_ID = 1398659438960971876
+APPLICATION_CH_ID  = 1378081331686412468
 
 ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
@@ -506,6 +508,29 @@ async def activity_maintenance() -> None:
         f"[activity] cycle complete: +{promoted} promoted, "
         f"{warned_n} warned, –{demoted} demoted"
     )
+# ============Welcome Message==============
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.bot:
+        return                                    # ignore bots
+
+    guild   = member.guild
+    welcome = guild.get_channel(WELCOME_CHANNEL_ID)
+    apply_ch = guild.get_channel(APPLICATION_CH_ID)   # could be same as welcome
+
+    if not welcome or not apply_ch:
+        print("Welcome or application channel missing!")
+        return
+
+    msg = (
+        f"👋 **Welcome {member.mention}!**\n"
+        f"To join CTFO, please run **`/memberform`** "
+        f"in {apply_ch.mention} and fill out the quick application.\n"
+        "If you have any questions, just ask a mod.  Enjoy your stay!"
+    )
+
+    await welcome.send(msg)
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
