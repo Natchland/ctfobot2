@@ -310,6 +310,27 @@ class Database:
 
 db = Database(DATABASE_URL)
 
+async def remove_duplicate_welcomes(channel: discord.TextChannel, user: discord.Member, welcome_marker: str):
+    """
+    Delete duplicate welcome messages mentioning the user in the channel,
+    keeping only the most recent.
+    """
+    matches = []
+    async for message in channel.history(limit=20):
+        if (
+            message.author == channel.guild.me and
+            welcome_marker in message.content and
+            user.mention in message.content
+        ):
+            matches.append(message)
+    if len(matches) > 1:
+        matches.sort(key=lambda m: m.created_at, reverse=True)
+        for msg in matches[1:]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
 #================Resume member forms=====================
 async def resume_member_forms():
     guild = bot.get_guild(GUILD_ID)
@@ -578,9 +599,9 @@ async def on_member_join(member: discord.Member):
     if member.bot:
         return  # ignore bots
 
-    guild   = member.guild
+    guild = member.guild
     welcome = guild.get_channel(WELCOME_CHANNEL_ID)
-    apply_ch = guild.get_channel(APPLICATION_CH_ID)   # could be same as welcome
+    apply_ch = guild.get_channel(APPLICATION_CH_ID)
 
     # 1. Add uncompleted application role
     role = guild.get_role(UNCOMPLETED_APP_ROLE_ID)
@@ -589,8 +610,10 @@ async def on_member_join(member: discord.Member):
             await member.add_roles(role, reason="Joined – application not started")
         except discord.Forbidden:
             print(f"[JOIN] Missing perms to add role to {member}")
+        except Exception as e:
+            print(f"[JOIN] Error adding role: {e}")
 
-    # 2. Send welcome message
+    # 2. Send welcome message and deduplicate
     if welcome and apply_ch:
         msg = (
             f"👋 **Welcome {member.mention}!**\n"
@@ -598,10 +621,16 @@ async def on_member_join(member: discord.Member):
             f"in {apply_ch.mention} and fill out the quick application.\n"
             "If you have any questions, just ask a mod.  Enjoy your stay!"
         )
-        await welcome.send(msg)
+        try:
+            await welcome.send(msg)
+        except Exception as e:
+            print(f"[WELCOME] Error sending welcome message: {e}")
+        try:
+            await remove_duplicate_welcomes(welcome, member, "👋 **Welcome")
+        except Exception as e:
+            print(f"[WELCOME] Error deduplicating: {e}")
     else:
         print("Welcome or application channel missing!")
-
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
     def __init__(self, bot_, db_):
