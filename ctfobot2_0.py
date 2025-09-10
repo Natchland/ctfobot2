@@ -925,7 +925,7 @@ class ActionView(discord.ui.View):
         return bot.loop.run_until_complete(db.get_reviewers())
 
     # -------------- Accept button --------------
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="memberform_accept")
     async def accept(self, inter, _):
         try:
             # Authorization check
@@ -990,8 +990,7 @@ class ActionView(discord.ui.View):
                 print(f"Could not send error message: {exc2}")
 
     # -------------- Deny button --------------
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger,
-                       emoji="⛔")
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔", custom_id="memberform_deny")
     async def deny(self, inter: discord.Interaction, _):
         if (inter.user.id not in self._reviewers()
                 and not inter.user.guild_permissions.ban_members):
