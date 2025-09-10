@@ -345,7 +345,15 @@ async def resume_member_forms():
     forms = await db.get_pending_member_forms()
     for form in forms:
         msg_id = form.get("message_id")
-        data = form.get("data") or {}
+        raw = form.get("data") or {}
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except Exception as e:
+                print(f"[resume_member_forms] Could not decode data: {raw} ({e})")
+                continue
+        else:
+            data = raw
         region = data.get("region")
         focus = data.get("focus")
         user_id = form.get("user_id")
