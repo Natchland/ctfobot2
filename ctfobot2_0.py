@@ -535,31 +535,31 @@ async def activity_maintenance() -> None:
 @bot.event
 async def on_member_join(member: discord.Member):
     if member.bot:
-        return                                    # ignore bots
+        return  # ignore bots
 
     guild   = member.guild
     welcome = guild.get_channel(WELCOME_CHANNEL_ID)
     apply_ch = guild.get_channel(APPLICATION_CH_ID)   # could be same as welcome
 
-    if not welcome or not apply_ch:
-        print("Welcome or application channel missing!")
-        return
-
-    msg = (
-        f"👋 **Welcome {member.mention}!**\n"
-        f"To join CTFO, please run **`/memberform`** "
-        f"in {apply_ch.mention} and fill out the quick application.\n"
-        "If you have any questions, just ask a mod.  Enjoy your stay!"
-    )
-
-    role = member.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
+    # 1. Add uncompleted application role
+    role = guild.get_role(UNCOMPLETED_APP_ROLE_ID)
     if role and role not in member.roles:
         try:
             await member.add_roles(role, reason="Joined – application not started")
         except discord.Forbidden:
             print(f"[JOIN] Missing perms to add role to {member}")
 
-    await welcome.send(msg)
+    # 2. Send welcome message
+    if welcome and apply_ch:
+        msg = (
+            f"👋 **Welcome {member.mention}!**\n"
+            f"To join CTFO, please run **`/memberform`** "
+            f"in {apply_ch.mention} and fill out the quick application.\n"
+            "If you have any questions, just ask a mod.  Enjoy your stay!"
+        )
+        await welcome.send(msg)
+    else:
+        print("Welcome or application channel missing!")
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 class CodesCog(commands.Cog):
