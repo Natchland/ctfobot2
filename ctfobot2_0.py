@@ -928,8 +928,7 @@ class ActionView(discord.ui.View):
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="memberform_accept")
     async def accept(self, inter, _):
         try:
-            # Authorization check
-            if (inter.user.id not in self._reviewers()
+            if (inter.user.id not in await self._reviewers()
                 and not inter.user.guild_permissions.manage_roles):
                 return await inter.response.send_message(
                     "Not authorised.", ephemeral=True)
@@ -992,7 +991,7 @@ class ActionView(discord.ui.View):
     # -------------- Deny button --------------
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔", custom_id="memberform_deny")
     async def deny(self, inter: discord.Interaction, _):
-        if (inter.user.id not in self._reviewers()
+        if (inter.user.id not in await self._reviewers()
                 and not inter.user.guild_permissions.ban_members):
             return await inter.response.send_message(
                 "Not authorised.", ephemeral=True)
