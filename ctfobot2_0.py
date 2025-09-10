@@ -678,13 +678,13 @@ async def on_member_join(member: discord.Member):
         print("Welcome or application channel missing!")
 
 # ══════════════════════════════════════════════════════════════════════
-#  STAFF APPLICATION SYSTEM  (persistent)
+#  STAFF APPLICATION SYSTEM  (persistent, button-paginated)
 # ══════════════════════════════════════════════════════════════════════
 from datetime import datetime, timezone
 
 # ───────────────────────  CONSTANTS  ───────────────────────
-STAFF_APPLICATION_CH_ID = 1410649548837093436      # review channel
-ADMIN_ROLE_ID           = 1377103244089622719      # ping on each new app
+STAFF_APPLICATION_CH_ID = 1410649548837093436      # channel where apps go
+ADMIN_ROLE_ID           = 1377103244089622719      # ping on new app
 
 STAFF_ROLE_IDS: dict[str, int] = {
     "Group Leader":      1377077466513932338,
@@ -747,32 +747,54 @@ class StaffRoleSelect(discord.ui.Select):
             StaffApplicationModal(self.values[0], 0, [])
         )
 
+# ---------- "Continue" button view ----------
+class ContinueView(discord.ui.View):
+    def __init__(self, role_name: str, next_index: int, collected: list[tuple[str, str]]):
+        super().__init__(timeout=300)
+        self.role_name  = role_name
+        self.next_index = next_index
+        self.collected  = collected
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="➡️")
+    async def continue_btn(self, inter: discord.Interaction, _):
+        # open next modal page
+        await inter.response.send_modal(
+            StaffApplicationModal(self.role_name, self.next_index, self.collected)
+        )
+        # disable button so it can't be double-clicked
+        for child in self.children:
+            child.disabled = True
+        await inter.message.edit(view=self)
+
 # ---------- multi-page modal (5 questions per page) ----------
 class StaffApplicationModal(discord.ui.Modal):
     def __init__(self, role_name: str, idx: int, collected: list[tuple[str, str]]):
         super().__init__(title=f"{role_name} Application")
-        self.role_name = role_name
-        self.idx       = idx
-        self.collected = collected
+        self.role_name  = role_name
+        self.idx        = idx           # start index into question list
+        self.collected  = collected     # previous Q&A pairs
 
-        for q, style, req in STAFF_QUESTION_SETS[role_name][idx: idx + 5]:
+        for q, style, req in STAFF_QUESTION_SETS[role_name][idx : idx + 5]:
             self.add_item(discord.ui.TextInput(label=q, style=style, required=req))
 
     async def on_submit(self, inter: discord.Interaction):
-        # store answers from this page
+        # cache answers from this page
         for comp in self.children:                       # type: ignore
             self.collected.append((comp.label, comp.value))  # type: ignore
 
-        nxt = self.idx + 5
-        if nxt < len(STAFF_QUESTION_SETS[self.role_name]):
-            # more pages
-            return await inter.response.send_modal(
-                StaffApplicationModal(self.role_name, nxt, self.collected)
+        next_idx = self.idx + 5
+        if next_idx < len(STAFF_QUESTION_SETS[self.role_name]):
+            # more questions → send Continue button
+            await inter.response.send_message(
+                "Page saved — click **Continue** to answer the next set:",
+                view=ContinueView(self.role_name, next_idx, self.collected),
+                ephemeral=True
             )
+            return
 
-        # ---------- finished: build embed ----------
-        guild      = inter.guild
-        review_ch  = guild.get_channel(STAFF_APPLICATION_CH_ID)
+        # -------------- NO MORE QUESTIONS: build & post embed --------------
+        guild     = inter.guild
+        review_ch = guild.get_channel(STAFF_APPLICATION_CH_ID)
         if not review_ch:
             return await inter.response.send_message(
                 "Error: review channel missing.", ephemeral=True
@@ -790,7 +812,6 @@ class StaffApplicationModal(discord.ui.Modal):
             embed.add_field(name=f"{i}. {q}", value=a or "N/A", inline=False)
         embed.set_footer(text=f"User ID: {inter.user.id}")
 
-        # send application
         view = StaffApplicationActionView(guild, inter.user.id, self.role_name)
         msg  = await review_ch.send(f"<@&{ADMIN_ROLE_ID}>", embed=embed, view=view)
 
@@ -798,18 +819,19 @@ class StaffApplicationModal(discord.ui.Modal):
         await db.add_staff_app(inter.user.id, self.role_name, msg.id)
 
         await inter.response.send_message(
-            "✅ Your staff application was submitted.", ephemeral=True
+            "✅ Your staff application was submitted.",
+            ephemeral=True
         )
 
 # ---------- reviewer buttons ----------
 class StaffApplicationActionView(discord.ui.View):
     def __init__(self, guild: discord.Guild, applicant_id: int, role_name: str):
         super().__init__(timeout=None)
-        self.guild         = guild
-        self.applicant_id  = applicant_id
-        self.role_name     = role_name
+        self.guild        = guild
+        self.applicant_id = applicant_id
+        self.role_name    = role_name
 
-    # permission: admin OR already staff
+    # reviewer permission: admin OR already staff
     async def _can(self, m: discord.Member) -> bool:
         return (m.guild_permissions.administrator
                 or any(r.id in STAFF_ROLE_IDS.values() for r in m.roles))
@@ -817,13 +839,16 @@ class StaffApplicationActionView(discord.ui.View):
     async def _dm(self, txt: str):
         user = await safe_fetch(self.guild, self.applicant_id)
         if user:
-            try:    await user.send(txt)
-            except discord.Forbidden: pass
+            try:
+                await user.send(txt)
+            except discord.Forbidden:
+                pass
 
     async def _finish(self, inter: discord.Interaction, colour: discord.Colour):
         emb = inter.message.embeds[0]
         emb.colour = colour
-        for c in self.children: c.disabled = True
+        for c in self.children:
+            c.disabled = True
         await inter.message.edit(embed=emb, view=self)
 
     # ----- ACCEPT -----
@@ -841,7 +866,8 @@ class StaffApplicationActionView(discord.ui.View):
         if not role:
             return await inter.response.send_message("Target role missing.", ephemeral=True)
 
-        try:    await applicant.add_roles(role, reason="Staff application accepted")
+        try:
+            await applicant.add_roles(role, reason="Staff application accepted")
         except discord.Forbidden:
             return await inter.response.send_message("Cannot add role.", ephemeral=True)
 
@@ -857,13 +883,10 @@ class StaffApplicationActionView(discord.ui.View):
         if not await self._can(inter.user):
             return await inter.response.send_message("Not authorised.", ephemeral=True)
 
-        applicant = await safe_fetch(self.guild, self.applicant_id)
-        if applicant:
-            await self._dm(f"❌ Your application for **{self.role_name}** was **denied**.")
-
         await db.update_staff_app_status(inter.message.id, "denied")
         await inter.response.send_message("Application denied ⛔", ephemeral=True)
         await self._finish(inter, discord.Color.red())
+        await self._dm(f"❌ Your application for **{self.role_name}** was **denied**.")
 
 # ───────────────────────  SLASH COMMAND  ───────────────────────
 @bot.tree.command(name="staffapply", description="Apply for a staff position")
@@ -1009,6 +1032,32 @@ async def unsilence(inter: Interaction, member: discord.Member):
         await log_ch.send(
             f"🔊 {member.mention} was **unsilenced** by {inter.user.mention}."
         )
+
+# ══════════════════════════════════════════════════════════════════════
+#  LEAVE / BAN ANNOUNCEMENTS (no @mentions)
+# ══════════════════════════════════════════════════════════════════════
+
+LEAVE_BAN_CH_ID = 1404955868054814761   # change if you prefer a different channel
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """
+    Fires when someone leaves the guild (voluntarily or kick).
+    """
+    channel = member.guild.get_channel(LEAVE_BAN_CH_ID)
+    if channel:
+        # member -> "Username#1234"
+        await channel.send(f"👋 **{member}** has left the server.")
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    """
+    Fires when someone is banned. (Does NOT trigger for temp-bans placed
+    via the member-form deny, because that uses guild.ban and so will fire.)
+    """
+    channel = guild.get_channel(LEAVE_BAN_CH_ID)
+    if channel:
+        await channel.send(f"⛔ **{user}** has been banned from the server.")
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
 
