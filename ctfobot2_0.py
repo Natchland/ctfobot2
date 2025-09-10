@@ -847,53 +847,68 @@ class ActionView(discord.ui.View):
         return bot.loop.run_until_complete(db.get_reviewers())
 
     # -------------- Accept button --------------
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success,
-                       emoji="✅")
-    async def accept(self, inter: discord.Interaction, _):
-        if (inter.user.id not in self._reviewers()
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, inter, _):
+        try:
+            # Authorization check
+            if (inter.user.id not in self._reviewers()
                 and not inter.user.guild_permissions.manage_roles):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True)
+                return await inter.response.send_message(
+                    "Not authorised.", ephemeral=True)
 
-        member = await safe_fetch(self.guild, self.uid)
-        if not member:
-            return await inter.response.send_message(
-                "Member not found.", ephemeral=True)
+            # Fetch the member to accept
+            member = await safe_fetch(self.guild, self.uid)
+            if not member:
+                return await inter.response.send_message(
+                    "Member not found.", ephemeral=True)
 
-        roles = [
-            r for r in (
-                self.guild.get_role(ACCEPT_ROLE_ID),
-                self.guild.get_role(REGION_ROLE_IDS.get(self.region, 0)),
-                self.guild.get_role(FOCUS_ROLE_IDS.get(self.focus, 0)),
-            ) if r
-        ]
-        if not roles:
-            return await inter.response.send_message(
-                "Some roles are missing.", ephemeral=True)
+            # Collect all roles to add
+            roles = [
+                r for r in (
+                    self.guild.get_role(ACCEPT_ROLE_ID),
+                    self.guild.get_role(REGION_ROLE_IDS.get(self.region, 0)),
+                    self.guild.get_role(FOCUS_ROLE_IDS.get(self.focus, 0)),
+                ) if r
+            ]
+            if not roles:
+                return await inter.response.send_message(
+                    "Some roles are missing.", ephemeral=True)
 
-        try:
-            await member.add_roles(*roles, reason="Application accepted")
-        except discord.Forbidden:
-            return await inter.response.send_message(
-                "Missing permissions to add roles.", ephemeral=True)
+            try:
+                await member.add_roles(*roles, reason="Application accepted")
+            except discord.Forbidden:
+                return await inter.response.send_message(
+                    "Missing permissions to add roles.", ephemeral=True)
 
-        # NEW: clean up application roles
-        try:
-            unc = self.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
-            comp = self.guild.get_role(COMPLETED_APP_ROLE_ID)
-            cleanup = [r for r in (unc, comp) if r and r in member.roles]
-            if cleanup:
-                await member.remove_roles(
-                    *cleanup, reason="Application accepted")
-        except discord.Forbidden:
-            print(f"[ACCEPT] Can't remove app roles from {member}")
+            # Remove application roles
+            try:
+                unc = self.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
+                comp = self.guild.get_role(COMPLETED_APP_ROLE_ID)
+                cleanup = [r for r in (unc, comp) if r and r in member.roles]
+                if cleanup:
+                    await member.remove_roles(*cleanup, reason="Application accepted")
+            except discord.Forbidden:
+                print(f"[ACCEPT] Can't remove app roles from {member}")
 
-        await inter.response.send_message(
-            f"{member.mention} accepted ✅", ephemeral=True)
+            await inter.response.send_message(
+                f"{member.mention} accepted ✅", ephemeral=True)
 
-        for c in self.children:               # disable both buttons
-            c.disabled = True
-        await inter.message.edit(view=self)
+            # Disable buttons
+            for c in self.children:
+                c.disabled = True
+            await inter.message.edit(view=self)
+        except Exception as exc:
+            print(f"[ACCEPT BUTTON ERROR] {type(exc).__name__}: {exc}")
+            # Try to send an error message if possible
+            try:
+                if not inter.response.is_done():
+                    await inter.response.send_message(
+                        f"Error: {exc}", ephemeral=True)
+                else:
+                    await inter.followup.send(
+                        f"Error: {exc}", ephemeral=True)
+            except Exception as exc2:
+                print(f"Could not send error message: {exc2}")
 
     # -------------- Deny button --------------
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger,
