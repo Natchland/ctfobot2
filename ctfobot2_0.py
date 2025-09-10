@@ -970,6 +970,11 @@ class ActionView(discord.ui.View):
                 f"{member.mention} accepted ✅", ephemeral=True)
             await db.update_member_form_status(inter.message.id, "accepted")
 
+            # Change embed color to green
+            embed = inter.message.embeds[0]
+            embed.color = discord.Color.green()
+            await inter.message.edit(embed=embed)
+
             # Disable buttons
             for c in self.children:
                 c.disabled = True
@@ -1007,6 +1012,10 @@ class ActionView(discord.ui.View):
         await inter.response.send_message(
             f"{member.mention} denied ⛔", ephemeral=True)
         await db.update_member_form_status(inter.message.id, "denied")
+
+        embed = inter.message.embeds[0]
+        embed.color = discord.Color.red()
+        await inter.message.edit(embed=embed)
 
         for c in self.children:
             c.disabled = True
