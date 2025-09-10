@@ -928,41 +928,70 @@ async def resume_staff_applications():
 # after db.connect() and other resume calls:
 # await resume_staff_applications()
 
-# ──────────────────────────────────────────────────────────────────
-#  SILENCE system – role-based (member keeps Connect permission)
-# ──────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+#  SILENCE SYSTEM  – role-based (keeps Connect) + auto-overwrites
+# ═════════════════════════════════════════════════════════════════════
 from discord import app_commands, Interaction
-from datetime import timedelta, datetime, timezone
+from datetime import datetime, timedelta, timezone
+import asyncio
+import discord
 
+# ───────────────────────  IDs  ───────────────────────
 SILENCER_ROLE_IDS = {
     1377077466513932338,   # Group Leader
     1377084533706588201,   # Player Management
     1377103244089622719,   # Admin
 }
+SILENCED_ROLE_ID = 1415481049953206324              # your “Silenced” role
 
-SILENCED_ROLE_ID = 1415481049953206324   # <—  put your new “Silenced” role ID here
-
-
-# ---------- helpers ----------
+# ───────────────────────  helpers  ───────────────────────
 def _can_silence(member: discord.Member) -> bool:
-    if member.guild_permissions.administrator:
-        return True
-    return any(r.id in SILENCER_ROLE_IDS for r in member.roles)
+    return (member.guild_permissions.administrator
+            or any(r.id in SILENCER_ROLE_IDS for r in member.roles))
 
+async def ensure_silenced_overwrites(guild: discord.Guild) -> None:
+    """
+    Make sure every channel/category has an overwrite for the Silenced role:
+      - Text → Send Messages ❌
+      - Voice/Stage → Speak ❌, Connect ✅
+    Only touches channels that are missing / incorrect, so it’s cheap to call
+    each time.
+    """
+    role = guild.get_role(SILENCED_ROLE_ID)
+    if role is None:
+        print("[silence] Silenced role missing!")
+        return
+
+    txt_overwrite = discord.PermissionOverwrite(send_messages=False)
+    vc_overwrite  = discord.PermissionOverwrite(speak=False, connect=True)
+
+    for ch in guild.channels:
+        try:
+            current = ch.overwrites_for(role)
+            if isinstance(ch, discord.TextChannel):
+                if current.send_messages is False:
+                    continue
+                await ch.set_permissions(role, overwrite=txt_overwrite)
+            elif isinstance(ch, (discord.VoiceChannel, discord.StageChannel)):
+                if current.speak is False and current.connect is True:
+                    continue
+                await ch.set_permissions(role, overwrite=vc_overwrite)
+        except discord.Forbidden:
+            print(f"[silence] Missing Manage Channel perm for {ch}")
+        except Exception as e:
+            print(f"[silence] Error on {ch}: {e}")
 
 async def _apply_silence(member: discord.Member):
     role = member.guild.get_role(SILENCED_ROLE_ID)
     if role and role not in member.roles:
         await member.add_roles(role, reason="Silenced via command")
 
-
 async def _remove_silence(member: discord.Member):
     role = member.guild.get_role(SILENCED_ROLE_ID)
     if role and role in member.roles:
         await member.remove_roles(role, reason="Unsilenced via command")
 
-
-# ---------- time choices ----------
+# ─────────────── time choices for slash option ───────────────
 _SILENCE_CHOICES: list[app_commands.Choice[int]] = [
     app_commands.Choice(name="5 minutes",   value=5 * 60),
     app_commands.Choice(name="15 minutes",  value=15 * 60),
@@ -973,9 +1002,9 @@ _SILENCE_CHOICES: list[app_commands.Choice[int]] = [
     app_commands.Choice(name="3 days",      value=3 * 24 * 60 * 60),
 ]
 
-# ---------- /silence ----------
+# ───────────────────────  /silence  ───────────────────────
 @bot.tree.command(name="silence",
-                  description="Prevent a user from speaking/typing while still letting them join voice")
+                  description="Mute a member (still lets them join & listen)")
 @app_commands.describe(member="Who to silence",
                        duration="How long the silence lasts")
 @app_commands.choices(duration=_SILENCE_CHOICES)
@@ -984,14 +1013,15 @@ async def silence(inter: Interaction,
                   duration: app_commands.Choice[int]):
     if not _can_silence(inter.user):
         return await inter.response.send_message("Not authorised.", ephemeral=True)
-
     if member.guild_permissions.administrator or member.bot:
         return await inter.response.send_message("That user cannot be silenced.", ephemeral=True)
 
-    # 1) immediate ACK so the token doesn’t expire
     await inter.response.defer(ephemeral=True)
 
-    # 2) add the silenced role
+    # ensure overwrites exist
+    await ensure_silenced_overwrites(member.guild)
+
+    # add role
     await _apply_silence(member)
 
     until = datetime.now(timezone.utc) + timedelta(seconds=duration.value)
@@ -999,7 +1029,6 @@ async def silence(inter: Interaction,
         f"🔇 {member.mention} has been silenced for **{duration.name}**."
     )
 
-    # optional staff log
     log_ch = bot.get_channel(WARNING_CH_ID)
     if log_ch:
         await log_ch.send(
@@ -1007,25 +1036,22 @@ async def silence(inter: Interaction,
             f"until <t:{int(until.timestamp())}:R>."
         )
 
-    # 3) schedule automatic unsilence
+    # auto-unsilence
     async def _unsilence_later():
         await asyncio.sleep(duration.value)
         try:
             await _remove_silence(member)
         except Exception:
             pass
-
     asyncio.create_task(_unsilence_later())
 
-
-# ---------- /unsilence ----------
+# ───────────────────────  /unsilence  ───────────────────────
 @bot.tree.command(name="unsilence",
                   description="Remove a user’s silence")
 @app_commands.describe(member="Who to unsilence")
 async def unsilence(inter: Interaction, member: discord.Member):
     if not _can_silence(inter.user):
         return await inter.response.send_message("Not authorised.", ephemeral=True)
-
     if member.bot:
         return await inter.response.send_message("Bots cannot be unsilenced.", ephemeral=True)
 
