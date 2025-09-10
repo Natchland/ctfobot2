@@ -283,24 +283,65 @@ class Database:
     # ────────────────────────────────────────────────────────────────
     #  MEMBER FORMS
     # ────────────────────────────────────────────────────────────────
-    async def add_member_form(self, uid, data: dict):
+    async def add_member_form(self, uid, data: dict, message_id: int = None):
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO member_forms (user_id, data) VALUES ($1,$2)",
-                uid, json.dumps(data)
+                """
+                INSERT INTO member_forms (user_id, data, message_id, status)
+                VALUES ($1,$2,$3,'pending')
+                """,
+                uid, json.dumps(data), message_id
             )
 
-    async def get_member_forms(self, uid: int | None = None):
+    async def update_member_form_status(self, message_id: int, status: str):
         async with self.pool.acquire() as conn:
-            if uid:
-                rows = await conn.fetch(
-                    "SELECT * FROM member_forms WHERE user_id=$1", uid
-                )
-            else:
-                rows = await conn.fetch("SELECT * FROM member_forms")
+            await conn.execute(
+                "UPDATE member_forms SET status=$1 WHERE message_id=$2",
+                status, message_id
+            )
+
+    async def get_pending_member_forms(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM member_forms
+                WHERE status='pending' AND message_id IS NOT NULL
+            """)
             return [dict(r) for r in rows]
 
 db = Database(DATABASE_URL)
+
+#================Resume member forms=====================
+async def resume_member_forms():
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        print("[resume_member_forms] Guild not found.")
+        return
+    channel = guild.get_channel(MEMBER_FORM_CH)
+    if not channel:
+        print("[resume_member_forms] Member form channel not found.")
+        return
+
+    forms = await db.get_pending_member_forms()
+    for form in forms:
+        msg_id = form.get("message_id")
+        data = form.get("data") or {}
+        region = data.get("region")
+        focus = data.get("focus")
+        user_id = form.get("user_id")
+        if not all([msg_id, region, focus, user_id]):
+            continue
+        try:
+            # Optionally: check if message still exists
+            await channel.fetch_message(msg_id)
+        except discord.NotFound:
+            print(f"[resume_member_forms] Message {msg_id} not found, skipping.")
+            continue
+        view = ActionView(guild, user_id, region, focus)
+        try:
+            bot.add_view(view, message_id=msg_id)
+            print(f"[resume_member_forms] Restored ActionView for form message {msg_id}")
+        except Exception as e:
+            print(f"[resume_member_forms] Error restoring view for {msg_id}: {e}")
     
 # ══════════════════════════════════════════════════════════════════════
 #                        UTILITIES  /  EMBEDS
@@ -892,6 +933,7 @@ class ActionView(discord.ui.View):
 
             await inter.response.send_message(
                 f"{member.mention} accepted ✅", ephemeral=True)
+            await db.update_member_form_status(inter.message.id, "accepted")
 
             # Disable buttons
             for c in self.children:
@@ -931,6 +973,7 @@ class ActionView(discord.ui.View):
         )
         await inter.response.send_message(
             f"{member.mention} denied ⛔", ephemeral=True)
+        await db.update_member_form_status(inter.message.id, "denied")
 
         for c in self.children:
             c.disabled = True
@@ -1076,13 +1119,33 @@ class FinalRegistrationModal(discord.ui.Modal):
             print(f"[FORM] Can't modify roles for {applicant}")
 
         # ------------ send to reviewer channel ------------
-        await inter.client.get_channel(MEMBER_FORM_CH).send(
+        form_msg = await inter.client.get_channel(MEMBER_FORM_CH).send(
             embed=e,
             view=ActionView(inter.guild, user.id,
                             d["region"], d["focus"])
         )
+        await db.add_member_form(
+            user.id,
+            {
+                "age": d["age"],
+                "region": d["region"],
+                "bans": d["bans"],
+                "ban_explanation": self.ban_expl.value if self.ban_expl else None,
+                "focus": d["focus"],
+                "skill": d["skill"],
+                "steam": self.steam.value,
+                "hours": self.hours.value,
+                "heard": self.heard.value,
+                "referral": self.referral.value if self.referral else None,
+                "gender": self.gender.value if self.gender else None
+            },
+            message_id=form_msg.id
+        )
+
+        # ------------ acknowledge user ------------
         await inter.response.send_message(
-            "Registration submitted – thank you!", ephemeral=True)
+            "Registration submitted – thank you!", ephemeral=True
+        )
 
         done = await inter.original_response()
 
@@ -1414,6 +1477,8 @@ async def on_ready():
 
     # resume any giveaways stored in DB
     await resume_giveaways()
+
+    await resume_member_forms()
 
     # start the LISTEN codes_changed background task
     bot.loop.create_task(listen_for_code_changes())
