@@ -128,6 +128,15 @@ class Database:
                 data       JSONB,
                 status     TEXT NOT NULL DEFAULT 'pending'
             );
+                               
+            CREATE TABLE IF NOT EXISTS staff_applications (
+                id         SERIAL PRIMARY KEY,
+                user_id    BIGINT,
+                role       TEXT,
+                message_id BIGINT,
+                status     TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT now()
+            );
 
             ALTER TABLE member_forms
             ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
@@ -306,6 +315,34 @@ class Database:
                 SELECT * FROM member_forms
                 WHERE status='pending' AND message_id IS NOT NULL
             """)
+            return [dict(r) for r in rows]
+        
+    # ────────────────────────────────────────────────────────────────
+    #  STAFF APPLICATIONS
+    # ────────────────────────────────────────────────────────────────
+    async def add_staff_app(self, uid: int, role: str, msg_id: int):
+        """Insert a new staff-application row."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO staff_applications (user_id, role, message_id)"
+                " VALUES ($1,$2,$3)",
+                uid, role, msg_id
+            )
+
+    async def update_staff_app_status(self, msg_id: int, status: str):
+        """Mark an application message as accepted / denied."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE staff_applications SET status=$1 WHERE message_id=$2",
+                status, msg_id
+            )
+
+    async def get_pending_staff_apps(self):
+        """Return all still-pending staff applications."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM staff_applications WHERE status='pending'"
+            )
             return [dict(r) for r in rows]
 
 db = Database(DATABASE_URL)
@@ -639,6 +676,234 @@ async def on_member_join(member: discord.Member):
             print(f"[WELCOME] Error deduplicating: {e}")
     else:
         print("Welcome or application channel missing!")
+
+# ══════════════════════════════════════════════════════════════════════
+#  STAFF APPLICATION SYSTEM  (persistent)
+# ══════════════════════════════════════════════════════════════════════
+from datetime import datetime, timezone
+
+# ───────────────────────  CONSTANTS  ───────────────────────
+STAFF_APPLICATION_CH_ID = 1410649548837093436      # review channel
+ADMIN_ROLE_ID           = 1377103244089622719      # ping on each new app
+
+STAFF_ROLE_IDS: dict[str, int] = {
+    "Group Leader":      1377077466513932338,
+    "Player Management": 1377084533706588201,
+    "Recruitment":       1410659214959054988,
+}
+
+# ───────────────────────  QUESTIONS  ───────────────────────
+#   tuple = (label, style, required)
+STAFF_QUESTION_SETS: dict[str, list[tuple[str, discord.TextStyle, bool]]] = {
+    "Group Leader": [
+        ("What group are you looking to lead?",          discord.TextStyle.short,     True),
+        ("Why do you want to be a group leader?",        discord.TextStyle.paragraph, True),
+        ("What makes you a good fit for this role?",     discord.TextStyle.paragraph, True),
+        ("How many Rust hours do you have?",             discord.TextStyle.short,     True),
+        ("How many hours a week are you available?",     discord.TextStyle.short,     True),
+        ("When are you most active?",                    discord.TextStyle.short,     True),
+        ("What time-zone are you in?",                   discord.TextStyle.short,     True),
+        ("How would you rate your in-game skills?",      discord.TextStyle.short,     True),
+        ("How old are you?",                             discord.TextStyle.short,     True),
+    ],
+    "Player Management": [
+        ("Why do you want to join player management?",        discord.TextStyle.paragraph, True),
+        ("What makes you good for this role?",                discord.TextStyle.paragraph, True),
+        ("Describe your leadership skills.",                  discord.TextStyle.paragraph, True),
+        ("How would you deal with someone breaking rules?",   discord.TextStyle.paragraph, True),
+        ("If you had to make an unpopular decision, then…?",  discord.TextStyle.paragraph, True),
+        ("If a player irritated you personally, how respond?",discord.TextStyle.paragraph, True),
+        ("If you felt annoyed/upset, what would you do?",     discord.TextStyle.paragraph, True),
+        ("What time-zone are you in?",                        discord.TextStyle.short,     True),
+        ("How many hours a week are you active?",             discord.TextStyle.short,     True),
+        ("When are you most active?",                         discord.TextStyle.short,     True),
+        ("How old are you?",                                  discord.TextStyle.short,     True),
+    ],
+    "Recruitment": [
+        ("Why do you want this role?",                        discord.TextStyle.paragraph, True),
+        ("What time-zone are you in?",                        discord.TextStyle.short,     True),
+        ("When are you most active?",                         discord.TextStyle.short,     True),
+        ("Are you banned from any Rust discords?",            discord.TextStyle.short,     True),
+        ("How old are you?",                                  discord.TextStyle.short,     True),
+        ("If someone you rejected messages you, what do?",    discord.TextStyle.paragraph, True),
+    ],
+}
+
+# ───────────────────────  UI CLASSES  ───────────────────────
+class StaffRoleSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(StaffRoleSelect())
+
+class StaffRoleSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select the staff role you’d like to apply for…",
+            options=[discord.SelectOption(label=r, value=r) for r in STAFF_QUESTION_SETS]
+        )
+
+    async def callback(self, inter: discord.Interaction):
+        await inter.response.send_modal(
+            StaffApplicationModal(self.values[0], 0, [])
+        )
+
+# ---------- multi-page modal (5 questions per page) ----------
+class StaffApplicationModal(discord.ui.Modal):
+    def __init__(self, role_name: str, idx: int, collected: list[tuple[str, str]]):
+        super().__init__(title=f"{role_name} Application")
+        self.role_name = role_name
+        self.idx       = idx
+        self.collected = collected
+
+        for q, style, req in STAFF_QUESTION_SETS[role_name][idx: idx + 5]:
+            self.add_item(discord.ui.TextInput(label=q, style=style, required=req))
+
+    async def on_submit(self, inter: discord.Interaction):
+        # store answers from this page
+        for comp in self.children:                       # type: ignore
+            self.collected.append((comp.label, comp.value))  # type: ignore
+
+        nxt = self.idx + 5
+        if nxt < len(STAFF_QUESTION_SETS[self.role_name]):
+            # more pages
+            return await inter.response.send_modal(
+                StaffApplicationModal(self.role_name, nxt, self.collected)
+            )
+
+        # ---------- finished: build embed ----------
+        guild      = inter.guild
+        review_ch  = guild.get_channel(STAFF_APPLICATION_CH_ID)
+        if not review_ch:
+            return await inter.response.send_message(
+                "Error: review channel missing.", ephemeral=True
+            )
+
+        embed = (
+            discord.Embed(
+                title=f"{self.role_name} Application",
+                colour=discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            .set_author(name=str(inter.user), icon_url=inter.user.display_avatar.url)
+        )
+        for i, (q, a) in enumerate(self.collected, 1):
+            embed.add_field(name=f"{i}. {q}", value=a or "N/A", inline=False)
+        embed.set_footer(text=f"User ID: {inter.user.id}")
+
+        # send application
+        view = StaffApplicationActionView(guild, inter.user.id, self.role_name)
+        msg  = await review_ch.send(f"<@&{ADMIN_ROLE_ID}>", embed=embed, view=view)
+
+        # DB
+        await db.add_staff_app(inter.user.id, self.role_name, msg.id)
+
+        await inter.response.send_message(
+            "✅ Your staff application was submitted.", ephemeral=True
+        )
+
+# ---------- reviewer buttons ----------
+class StaffApplicationActionView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, applicant_id: int, role_name: str):
+        super().__init__(timeout=None)
+        self.guild         = guild
+        self.applicant_id  = applicant_id
+        self.role_name     = role_name
+
+    # permission: admin OR already staff
+    async def _can(self, m: discord.Member) -> bool:
+        return (m.guild_permissions.administrator
+                or any(r.id in STAFF_ROLE_IDS.values() for r in m.roles))
+
+    async def _dm(self, txt: str):
+        user = await safe_fetch(self.guild, self.applicant_id)
+        if user:
+            try:    await user.send(txt)
+            except discord.Forbidden: pass
+
+    async def _finish(self, inter: discord.Interaction, colour: discord.Colour):
+        emb = inter.message.embeds[0]
+        emb.colour = colour
+        for c in self.children: c.disabled = True
+        await inter.message.edit(embed=emb, view=self)
+
+    # ----- ACCEPT -----
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success,
+                       emoji="✅", custom_id="staffapp_accept")
+    async def accept(self, inter: discord.Interaction, _):
+        if not await self._can(inter.user):
+            return await inter.response.send_message("Not authorised.", ephemeral=True)
+
+        applicant = await safe_fetch(self.guild, self.applicant_id)
+        if not applicant:
+            return await inter.response.send_message("Applicant left.", ephemeral=True)
+
+        role = self.guild.get_role(STAFF_ROLE_IDS[self.role_name])
+        if not role:
+            return await inter.response.send_message("Target role missing.", ephemeral=True)
+
+        try:    await applicant.add_roles(role, reason="Staff application accepted")
+        except discord.Forbidden:
+            return await inter.response.send_message("Cannot add role.", ephemeral=True)
+
+        await db.update_staff_app_status(inter.message.id, "accepted")
+        await inter.response.send_message(f"{applicant.mention} accepted ✅", ephemeral=True)
+        await self._finish(inter, discord.Color.green())
+        await self._dm(f"🎉 You have been **accepted** as **{self.role_name}**!")
+
+    # ----- DENY -----
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger,
+                       emoji="⛔", custom_id="staffapp_deny")
+    async def deny(self, inter: discord.Interaction, _):
+        if not await self._can(inter.user):
+            return await inter.response.send_message("Not authorised.", ephemeral=True)
+
+        applicant = await safe_fetch(self.guild, self.applicant_id)
+        if applicant:
+            await self._dm(f"❌ Your application for **{self.role_name}** was **denied**.")
+
+        await db.update_staff_app_status(inter.message.id, "denied")
+        await inter.response.send_message("Application denied ⛔", ephemeral=True)
+        await self._finish(inter, discord.Color.red())
+
+# ───────────────────────  SLASH COMMAND  ───────────────────────
+@bot.tree.command(name="staffapply", description="Apply for a staff position")
+async def staffapply(inter: discord.Interaction):
+    await inter.response.send_message(
+        "Select the staff role you’d like to apply for:",
+        view=StaffRoleSelectView(),
+        ephemeral=True
+    )
+
+# ───────────────────────  RESUME PENDING ON STARTUP  ───────────────────────
+async def resume_staff_applications():
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+    channel = guild.get_channel(STAFF_APPLICATION_CH_ID)
+    if not channel:
+        return
+
+    for app in await db.get_pending_staff_apps():           # [{'user_id', 'role', 'message_id'}]
+        msg_id   = app["message_id"]
+        role_name= app["role"]
+        user_id  = app["user_id"]
+
+        try:
+            # verify message still exists
+            await channel.fetch_message(msg_id)
+        except discord.NotFound:
+            continue
+
+        view = StaffApplicationActionView(guild, user_id, role_name)
+        try:
+            bot.add_view(view, message_id=msg_id)
+            print(f"[resume_staff_apps] Restored view for {msg_id}")
+        except Exception as e:
+            print(f"[resume_staff_apps] error {e}")
+
+# ---- call it from on_ready() ----
+# after db.connect() and other resume calls:
+# await resume_staff_applications()
 
 # ──────────────────────────────────────────────────────────────────────
 #  SILENCE  (voice+text timeout)
@@ -1641,6 +1906,8 @@ async def on_ready():
     await resume_giveaways()
 
     await resume_member_forms()
+
+    await resume_staff_applications()
 
     # start the LISTEN codes_changed background task
     bot.loop.create_task(listen_for_code_changes())
