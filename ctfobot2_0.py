@@ -746,6 +746,20 @@ async def unsilence(inter: Interaction, member: discord.Member):
         )
 
 # ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
+
+# ──────────────────────────────────────────────────────────────────────
+#  /generatecode  – get a random 4-digit pin (ephemeral)
+# ──────────────────────────────────────────────────────────────────────
+from random import randint
+
+@bot.tree.command(name="generatecode", description="Generate a random 4-digit code")
+async def generate_code(inter: discord.Interaction):
+    pin = str(randint(0, 9999)).zfill(4)   # always 4 digits, leading zeros allowed
+    await inter.response.send_message(
+        f"Your random code: `{pin}`",
+        ephemeral=True
+    )
+
 class CodesCog(commands.Cog):
     def __init__(self, bot_, db_):
         self.bot, self.db = bot_, db_
