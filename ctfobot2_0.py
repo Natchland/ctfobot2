@@ -915,14 +915,13 @@ class ActionView(discord.ui.View):
     Added to every embed posted in MEMBER_FORM_CH.
     Lets reviewers accept or deny an applicant.
     """
-    def __init__(self, guild: discord.Guild, uid: int,
-                 region: str, focus: str):
+    def __init__(self, guild: discord.Guild, uid: int, region: str, focus: str):
         super().__init__(timeout=None)
         self.guild, self.uid, self.region, self.focus = guild, uid, region, focus
 
-    # helper to fetch reviewers set
-    def _reviewers(self) -> set[int]:
-        return bot.loop.run_until_complete(db.get_reviewers())
+    # helper to fetch reviewers set (async!)
+    async def _reviewers(self) -> set[int]:
+        return await db.get_reviewers()
 
     # -------------- Accept button --------------
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="memberform_accept")
@@ -977,7 +976,6 @@ class ActionView(discord.ui.View):
             await inter.message.edit(view=self)
         except Exception as exc:
             print(f"[ACCEPT BUTTON ERROR] {type(exc).__name__}: {exc}")
-            # Try to send an error message if possible
             try:
                 if not inter.response.is_done():
                     await inter.response.send_message(
@@ -1025,7 +1023,6 @@ class ActionView(discord.ui.View):
             except discord.HTTPException:
                 pass
         asyncio.create_task(unban_later())
-
 # ───────────────────────── helper to fetch a member safely ─────────────────────
 async def safe_fetch(guild: discord.Guild, uid: int) -> discord.Member | None:
     try:
@@ -1196,10 +1193,11 @@ class FinalRegistrationModal(discord.ui.Modal):
         asyncio.create_task(tidy())
 
 # ───────────────────────────── /memberform slash command ───────────────────────
-@bot.tree.command(name="memberform",
-                  description="Start member registration")
+@bot.tree.command(name="memberform", description="Start member registration")
 async def memberform(inter: discord.Interaction):
-    await inter.response.send_message(
+    await inter.response.defer(ephemeral=True)
+    # Do slow work, then:
+    await inter.followup.send(
         "Click below to begin registration:",
         view=MemberRegistrationView(),
         ephemeral=True
