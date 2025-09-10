@@ -757,7 +757,7 @@ class ContinueView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="➡️")
     async def continue_btn(self, inter: discord.Interaction, _):
-        # open next modal page
+        # Open next modal page
         await inter.response.send_modal(
             StaffApplicationModal(self.role_name, self.next_index, self.collected)
         )
