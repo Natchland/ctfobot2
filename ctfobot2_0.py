@@ -928,26 +928,41 @@ async def resume_staff_applications():
 # after db.connect() and other resume calls:
 # await resume_staff_applications()
 
-# ──────────────────────────────────────────────────────────────────────
-#  SILENCE  (voice+text timeout)
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+#  SILENCE system – role-based (member keeps Connect permission)
+# ──────────────────────────────────────────────────────────────────
 from discord import app_commands, Interaction
 from datetime import timedelta, datetime, timezone
 
-# ── roles that may use /silence (add to your constants section) ──
 SILENCER_ROLE_IDS = {
     1377077466513932338,   # Group Leader
     1377084533706588201,   # Player Management
     1377103244089622719,   # Admin
 }
 
-# ---------- helper ----------
+SILENCED_ROLE_ID = 1415481049953206324   # <—  put your new “Silenced” role ID here
+
+
+# ---------- helpers ----------
 def _can_silence(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
     return any(r.id in SILENCER_ROLE_IDS for r in member.roles)
 
-# ---------- choices (value is seconds) ----------
+
+async def _apply_silence(member: discord.Member):
+    role = member.guild.get_role(SILENCED_ROLE_ID)
+    if role and role not in member.roles:
+        await member.add_roles(role, reason="Silenced via command")
+
+
+async def _remove_silence(member: discord.Member):
+    role = member.guild.get_role(SILENCED_ROLE_ID)
+    if role and role in member.roles:
+        await member.remove_roles(role, reason="Unsilenced via command")
+
+
+# ---------- time choices ----------
 _SILENCE_CHOICES: list[app_commands.Choice[int]] = [
     app_commands.Choice(name="5 minutes",   value=5 * 60),
     app_commands.Choice(name="15 minutes",  value=15 * 60),
@@ -958,79 +973,70 @@ _SILENCE_CHOICES: list[app_commands.Choice[int]] = [
     app_commands.Choice(name="3 days",      value=3 * 24 * 60 * 60),
 ]
 
-# ---------- /silence command ----------
-@bot.tree.command(name="silence", description="Temporarily prevent a user from speaking or typing")
-@app_commands.describe(
-    member="Who to silence",
-    duration="How long the silence lasts"
-)
+# ---------- /silence ----------
+@bot.tree.command(name="silence",
+                  description="Prevent a user from speaking/typing while still letting them join voice")
+@app_commands.describe(member="Who to silence",
+                       duration="How long the silence lasts")
 @app_commands.choices(duration=_SILENCE_CHOICES)
-async def silence(inter: Interaction, member: discord.Member, duration: app_commands.Choice[int]):
-    # ── permission check ──
+async def silence(inter: Interaction,
+                  member: discord.Member,
+                  duration: app_commands.Choice[int]):
     if not _can_silence(inter.user):
         return await inter.response.send_message("Not authorised.", ephemeral=True)
 
-    # cannot silence higher-ranked staff / bots easily
-    if member.guild_permissions.administrator:
-        return await inter.response.send_message("That user is an administrator; aborting.", ephemeral=True)
-    if member.bot:
-        return await inter.response.send_message("Bots cannot be silenced.", ephemeral=True)
+    if member.guild_permissions.administrator or member.bot:
+        return await inter.response.send_message("That user cannot be silenced.", ephemeral=True)
 
-    # ── apply timeout ──
+    # 1) immediate ACK so the token doesn’t expire
+    await inter.response.defer(ephemeral=True)
+
+    # 2) add the silenced role
+    await _apply_silence(member)
+
     until = datetime.now(timezone.utc) + timedelta(seconds=duration.value)
-    try:
-        # discord.py ≥ 2.2
-        await member.timeout(until, reason=f"Silenced by {inter.user} for {duration.name}")
-    except AttributeError:
-        # fallback for older discord.py
-        await member.edit(timed_out_until=until, reason=f"Silenced by {inter.user} for {duration.name}")
-
-    # ── notify ──
-    await inter.response.send_message(
-        f"🔇 {member.mention} has been silenced for **{duration.name}**.",
-        ephemeral=True
+    await inter.followup.send(
+        f"🔇 {member.mention} has been silenced for **{duration.name}**."
     )
 
-    # Optional: log in a public mod channel
+    # optional staff log
     log_ch = bot.get_channel(WARNING_CH_ID)
     if log_ch:
         await log_ch.send(
-            f"🔇 {member.mention} was silenced by {inter.user.mention} "
-            f"for **{duration.name}** (until <t:{int(until.timestamp())}:R>)."
+            f"🔇 {member.mention} silenced by {inter.user.mention} "
+            f"until <t:{int(until.timestamp())}:R>."
         )
 
-# ──────────────────────────────────────────────────────────────────────
-#  UNSILENCE  (remove communication timeout)
-# ──────────────────────────────────────────────────────────────────────
-@bot.tree.command(name="unsilence", description="Remove a member’s silence / timeout")
+    # 3) schedule automatic unsilence
+    async def _unsilence_later():
+        await asyncio.sleep(duration.value)
+        try:
+            await _remove_silence(member)
+        except Exception:
+            pass
+
+    asyncio.create_task(_unsilence_later())
+
+
+# ---------- /unsilence ----------
+@bot.tree.command(name="unsilence",
+                  description="Remove a user’s silence")
 @app_commands.describe(member="Who to unsilence")
 async def unsilence(inter: Interaction, member: discord.Member):
-    # ── permission check ──
     if not _can_silence(inter.user):
         return await inter.response.send_message("Not authorised.", ephemeral=True)
 
     if member.bot:
         return await inter.response.send_message("Bots cannot be unsilenced.", ephemeral=True)
 
-    # ── clear timeout ──
-    try:
-        # discord.py ≥ 2.2
-        await member.timeout(None, reason=f"Unsilenced by {inter.user}")
-    except AttributeError:
-        # fallback for older discord.py
-        await member.edit(timed_out_until=None, reason=f"Unsilenced by {inter.user}")
+    await inter.response.defer(ephemeral=True)
+    await _remove_silence(member)
+    await inter.followup.send(f"🔊 {member.mention} has been unsilenced.")
 
-    # ── notify ──
-    await inter.response.send_message(
-        f"🔊 {member.mention} has been unsilenced.",
-        ephemeral=True
-    )
-
-    # Optional: log in a public mod channel
     log_ch = bot.get_channel(WARNING_CH_ID)
     if log_ch:
         await log_ch.send(
-            f"🔊 {member.mention} was **unsilenced** by {inter.user.mention}."
+            f"🔊 {member.mention} unsilenced by {inter.user.mention}."
         )
 
 # ══════════════════════════════════════════════════════════════════════
