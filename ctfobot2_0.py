@@ -1837,23 +1837,16 @@ async def on_ready():
     await db.connect()
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    # sync slash-commands to the guild
     guild_obj = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
     print("Slash-commands synced")
 
-    # initial /codes embed
     await update_codes_message(bot, await db.get_codes())
-
-    # resume any giveaways stored in DB
     await resume_giveaways()
-
     await resume_member_forms()
-
     await resume_staff_applications()
 
-    # start the LISTEN codes_changed background task
     bot.loop.create_task(listen_for_code_changes())
     bot.loop.create_task(listen_for_giveaway_changes())
 
@@ -1863,13 +1856,30 @@ async def on_ready():
     print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
+#  ENTRY POINTS  – safe for import OR direct execution
+# ══════════════════════════════════════════════════════════════════════
+async def _run_bot():
+    """Internal helper used by main()."""
+    await bot.start(BOT_TOKEN)
+
 def main() -> None:
+    """
+    • If called from a script with no running loop → starts asyncio.run().
+    • If called from code that is already inside a loop (FastAPI) →
+      schedules bot.start() on that loop.
+    """
     if not BOT_TOKEN or not DATABASE_URL:
-        raise RuntimeError(
-            "Set BOT_TOKEN and DATABASE_URL environment variables!"
-        )
+        raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
 
-    bot.run(BOT_TOKEN)
+    try:
+        loop = asyncio.get_running_loop()   # are we already inside a loop?
+    except RuntimeError:
+        # No loop yet → normal CLI usage
+        asyncio.run(_run_bot())
+    else:
+        # Loop exists → schedule bot.start() in background
+        loop.create_task(_run_bot())
 
+# Standard guard so the bot still starts when executed directly
 if __name__ == "__main__":
     main()

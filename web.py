@@ -2,15 +2,15 @@
 FastAPI control-panel for CTFO bot
 ──────────────────────────────────
 • Runs next to the Discord bot but as a separate Railway service.
-• Safe to import the bot module because the bot starts only via
-  ctfobot2_0.main(), NOT on mere import.
+• Importing ctfobot2_0 is safe because the bot starts only when
+  botmod.main() is invoked (never at mere import).
 """
 
 from __future__ import annotations
 
 import os, json, datetime, asyncio, inspect, httpx, asyncpg
 from pathlib import Path
-from typing import Callable, Awaitable, Any, Coroutine
+from typing import Callable, Awaitable, Any
 
 from itsdangerous import URLSafeSerializer, BadSignature
 from passlib.context import CryptContext
@@ -22,7 +22,6 @@ from fastapi import (
     Form,
     Response,
     HTTPException,
-    Depends,
 )
 from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,8 +34,8 @@ import discord
 # ─────────────────────────────────────────────────────────────
 import ctfobot2_0 as botmod
 
-BOT_TOKEN  = botmod.BOT_TOKEN
-GUILD_ID   = botmod.GUILD_ID
+BOT_TOKEN = botmod.BOT_TOKEN
+GUILD_ID  = botmod.GUILD_ID
 
 # ─────────────────────────────────────────────────────────────
 #  CONFIG
@@ -45,10 +44,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required for the web service")
 
-WEB_SECRET   = os.getenv("WEB_SECRET", "CHANGE_ME")
-OWNER_KEY    = os.getenv("OWNER_KEY",  "OWNER_ONLY")
-
-COOKIE_NAME  = "ctfo_admin"
+WEB_SECRET  = os.getenv("WEB_SECRET", "CHANGE_ME")
+OWNER_KEY   = os.getenv("OWNER_KEY",  "OWNER_ONLY")
+COOKIE_NAME = "ctfo_admin"
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 signer  = URLSafeSerializer(WEB_SECRET)
@@ -63,16 +61,16 @@ static_path = Path("static")
 if static_path.is_dir():
     app.mount("/static", StaticFiles(directory=static_path), name="static")
 
-db: asyncpg.Pool | None = None   # initialised in startup event
+db: asyncpg.Pool | None = None        # initialised on startup
 
 # ═════════════════════════════  HELPERS  ══════════════════════════════
 async def current_user(request: Request) -> str | None:
     """
     Return username stored in signed cookie **if** that user exists in DB
-    and is approved; otherwise return None.
+    and is approved; otherwise None.
     """
     if db is None:
-        return None                    # pool not ready yet
+        return None
 
     token = request.cookies.get(COOKIE_NAME)
     if not token:
@@ -85,20 +83,20 @@ async def current_user(request: Request) -> str | None:
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT username, approved FROM admins WHERE username=$1",
-            username,
+            username
         )
     return row["username"] if row and row["approved"] else None
 
 
 def login_required(fn: Callable[..., Awaitable[Any]]):
     """
-    Decorator that:
-      • checks cookie,
-      • redirects to /login when missing/invalid,
-      • injects `user` (str) into the wrapped endpoint.
+    Decorator that
+      • verifies cookie,
+      • redirects unauthenticated users to /login,
+      • injects a `user` argument (str) into the endpoint.
     """
-    sig = inspect.signature(fn)
-    params = list(sig.parameters.values())
+    sig      = inspect.signature(fn)
+    params   = list(sig.parameters.values())
 
     async def wrapper(request: Request, *args, **kwargs):   # type: ignore
         user = await current_user(request)
@@ -106,18 +104,19 @@ def login_required(fn: Callable[..., Awaitable[Any]]):
             return RedirectResponse("/login", status_code=303)
         return await fn(request, user, *args, **kwargs)
 
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__  = fn.__doc__
+    wrapper.__name__      = fn.__name__
+    wrapper.__doc__       = fn.__doc__
     wrapper.__signature__ = inspect.Signature(
         parameters=[p for p in params if p.name != "user"]
     )
     return wrapper
 
+
 def _build_role_list(guild: discord.Guild, data: dict[str, str]):
     roles: list[discord.Role] = []
-    if (r := guild.get_role(botmod.ACCEPT_ROLE_ID)): roles.append(r)
-    if (r := guild.get_role(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))): roles.append(r)
-    if (r := guild.get_role(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):  roles.append(r)
+    if (r := guild.get_role(botmod.ACCEPT_ROLE_ID)):                               roles.append(r)
+    if (r := guild.get_role(botmod.REGION_ROLE_IDS.get(data.get("region"), 0))):   roles.append(r)
+    if (r := guild.get_role(botmod.FOCUS_ROLE_IDS.get(data.get("focus"), 0))):     roles.append(r)
     return roles
 
 # ═════════════════════════════  START-UP  ═════════════════════════════
@@ -140,16 +139,18 @@ async def init_database():
         );""")
     print("[web] DB pool ready")
 
+
 @app.on_event("startup")
 async def launch_discord_bot():
     """
-    Start the Discord bot in *this* process **only if** BOT_TOKEN is
-    defined.  (Bot module is import-safe because its run logic is inside
-    ctfobot2_0.main().)
+    Start the Discord bot in *this* process **only if** BOT_TOKEN is set.
+    botmod.main() is synchronous; it schedules the async start coroutine
+    on the already-running FastAPI loop.
     """
     if BOT_TOKEN:
-        asyncio.create_task(botmod.main())
-        print("[web] Discord bot launched inside web service")
+        botmod.main()                        # no create_task needed
+        print("[web] Discord bot task scheduled")
+
 
 @app.on_event("shutdown")
 async def stop_discord_bot():
@@ -159,10 +160,7 @@ async def stop_discord_bot():
 
 # ═════════════════════════════  DATA QUERIES  ═════════════════════════
 async def all_admin_data():
-    """
-    Fetch codes, member_forms, giveaways for the admin dashboard.
-    Also JSON-decode the `data` column of member_forms.
-    """
+    """Fetch codes, member_forms, giveaways for the admin dashboard."""
     async with db.acquire() as conn:
         codes = await conn.fetch("SELECT * FROM codes ORDER BY name")
         forms = await conn.fetch(
@@ -186,7 +184,7 @@ async def all_admin_data():
 # ═════════════════════════════  PUBLIC PAGE  ══════════════════════════
 @app.get("/", response_class=HTMLResponse)
 async def welcome(request: Request):
-    """Simple landing page that shows guild member count via Discord widget."""
+    """Landing page that shows live guild member count via widget."""
     member_count = "?"
     try:
         async with httpx.AsyncClient() as cli:
@@ -234,9 +232,8 @@ async def _get_admin_row(username: str):
 
 @app.get("/signup", response_class=HTMLResponse)
 async def signup_get(request: Request):
-    return templates.TemplateResponse(
-        "signup.html", {"request": request}
-    )
+    return templates.TemplateResponse("signup.html", {"request": request})
+
 
 @app.post("/signup")
 async def signup_post(username: str = Form(...), password: str = Form(...)):
@@ -251,11 +248,11 @@ async def signup_post(username: str = Form(...), password: str = Form(...)):
             raise HTTPException(400, "Username already exists.")
     return RedirectResponse("/login?pending=1", status_code=303)
 
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_get(request: Request, pending: int | None = None):
     return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "pending": pending}
+        "login.html", {"request": request, "pending": pending}
     )
 
 @app.post("/login")
@@ -265,7 +262,8 @@ async def login_post(
     password: str = Form(...)
 ):
     row = await _get_admin_row(username)
-    if (not row or not row["approved"]
+    if (not row
+            or not row["approved"]
             or not pwd_ctx.verify(password, row["pwd_hash"])):
         raise HTTPException(403, "Invalid credentials or not yet approved.")
 
@@ -289,8 +287,7 @@ async def approve_user(request: Request, username: str = Form(...)):
         raise HTTPException(403, "Bad owner key.")
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE admins SET approved=TRUE WHERE username=$1",
-            username
+            "UPDATE admins SET approved=TRUE WHERE username=$1", username
         )
     return "approved"
 
@@ -308,17 +305,16 @@ async def add_code(
         raise HTTPException(400, "Pin must be 4 digits.")
     async with db.acquire() as conn:
         await conn.execute("""
-        INSERT INTO codes (name, pin, public)
-        VALUES ($1,$2,$3)
-        ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
+            INSERT INTO codes (name, pin, public)
+            VALUES ($1,$2,$3)
+            ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
         """, name, pin, public is not None)
     return RedirectResponse("/admin", status_code=303)
 
+
 @app.post("/codes/remove")
 @login_required
-async def remove_code(
-    request: Request, user: str, name: str = Form(...)
-):
+async def remove_code(request: Request, user: str, name: str = Form(...)):
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM codes WHERE name=$1", name)
     return RedirectResponse("/admin", status_code=303)
@@ -330,7 +326,7 @@ async def update_form(
     request: Request,
     user: str,
     id: int = Form(...),
-    json_text: str = Form(..., alias="json"),
+    json_text: str = Form(..., alias="json")
 ):
     try:
         parsed = json.loads(json_text)
@@ -344,25 +340,20 @@ async def update_form(
         )
     return JSONResponse({"status": "updated"})
 
+
 @app.post("/forms/accept")
 @login_required
 async def accept_member(request: Request, user: str, id: int = Form(...)):
-    # ------- fetch row -------
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id, data, status FROM member_forms WHERE id=$1",
-            id
+            "SELECT user_id, data, status FROM member_forms WHERE id=$1", id
         )
     if not row or row["status"] != "pending":
         raise HTTPException(400, "Form not found or already handled")
 
-    data: dict = (
-        json.loads(row["data"])
-        if isinstance(row["data"], str) else row["data"]
-    )
-    uid: int = row["user_id"]
+    data: dict = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+    uid: int   = row["user_id"]
 
-    # ------- get guild / member -------
     guild = botmod.bot.get_guild(GUILD_ID)
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
@@ -372,47 +363,39 @@ async def accept_member(request: Request, user: str, id: int = Form(...)):
     except discord.NotFound:
         raise HTTPException(404, "User left the guild")
 
-    # ------- add roles -------
     roles = _build_role_list(guild, data)
     if not roles:
         raise HTTPException(500, "Required roles missing in guild")
-
     await member.add_roles(*roles, reason=f"Accepted via web panel ({user})")
 
-    # ------- update DB -------
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE member_forms SET status='accepted' WHERE id=$1",
-            id
+            "UPDATE member_forms SET status='accepted' WHERE id=$1", id
         )
-
     return JSONResponse({"status": "accepted"})
+
 
 @app.post("/forms/deny")
 @login_required
 async def deny_member(request: Request, user: str, id: int = Form(...)):
-    # ------- fetch row -------
     async with db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id, status FROM member_forms WHERE id=$1",
-            id
+            "SELECT user_id, status FROM member_forms WHERE id=$1", id
         )
     if not row or row["status"] != "pending":
         raise HTTPException(400, "Form not found or already handled")
 
     uid: int = row["user_id"]
-    guild = botmod.bot.get_guild(GUILD_ID)
+    guild    = botmod.bot.get_guild(GUILD_ID)
     if not guild:
         raise HTTPException(503, "Discord bot not ready")
 
-    # ------- ban -------
     await guild.ban(
         discord.Object(id=uid),
         reason=f"Application denied via web panel by {user} (temp-ban)",
         delete_message_seconds=0
     )
 
-    # schedule un-ban
     async def unban_later():
         await asyncio.sleep(botmod.TEMP_BAN_SECONDS)
         try:
@@ -421,14 +404,12 @@ async def deny_member(request: Request, user: str, id: int = Form(...)):
             pass
     asyncio.create_task(unban_later())
 
-    # update DB
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE member_forms SET status='denied' WHERE id=$1",
-            id
+            "UPDATE member_forms SET status='denied' WHERE id=$1", id
         )
-
     return JSONResponse({"status": "denied"})
+
 
 @app.post("/forms/delete")
 @login_required
@@ -456,12 +437,12 @@ async def update_giveaway(
         """, id, prize, end_ts, note)
     return RedirectResponse("/admin#giveaways", status_code=303)
 
+
 @app.post("/giveaways/end")
 @login_required
 async def end_giveaway(request: Request, user: str, id: int = Form(...)):
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE giveaways SET active=FALSE WHERE id=$1",
-            id
+            "UPDATE giveaways SET active=FALSE WHERE id=$1", id
         )
     return RedirectResponse("/admin#giveaways", status_code=303)
