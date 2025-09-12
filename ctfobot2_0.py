@@ -1863,8 +1863,13 @@ async def on_ready():
     print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
-if not BOT_TOKEN or not DATABASE_URL:
-    raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
+def main() -> None:
+    if not BOT_TOKEN or not DATABASE_URL:
+        raise RuntimeError(
+            "Set BOT_TOKEN and DATABASE_URL environment variables!"
+        )
+
+    bot.run(BOT_TOKEN)
 
 if __name__ == "__main__":
-    bot.run(BOT_TOKEN)
+    main()
