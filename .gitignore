@@ -11,3 +11,4 @@ reviewers.json
 
 # secrets
 .env
+.venv
