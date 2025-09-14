@@ -976,6 +976,7 @@ async def resume_staff_applications():
 # await resume_staff_applications()
 
 # ───────────────────────────── /inactive ─────────────────────────────
+# Anyone can run it; always applies to the caller them-self.
 PERIOD_CHOICES: list[tuple[str, int]] = [
     ("1 week", 7),
     ("2 weeks", 14),
@@ -983,33 +984,40 @@ PERIOD_CHOICES: list[tuple[str, int]] = [
     ("2 months", 60),
 ]
 
-@bot.tree.command(name="inactive", description="Mark a member as temporarily inactive")
-@app_commands.checks.has_permissions(manage_roles=True)
+@bot.tree.command(
+    name="inactive",
+    description="Mark yourself as temporarily inactive"
+)
 @app_commands.choices(
     period=[app_commands.Choice(name=n, value=d) for n, d in PERIOD_CHOICES]
 )
 @app_commands.describe(
-    member="Member to mark inactive",
-    period="How long they will be inactive",
-    reason="Reason for inactivity"
+    period="How long you will be inactive",
+    reason="Reason for inactivity (required)"
 )
 async def inactive_cmd(
     inter:  discord.Interaction,
-    member: discord.Member,
     period: app_commands.Choice[int],
     reason: str
 ):
-    guild    = inter.guild
+    guild = inter.guild
+    if guild is None:                               # safety (shouldn’t happen)
+        return await inter.response.send_message(
+            "This command can only be used in a guild.", ephemeral=True
+        )
+
+    member   = guild.get_member(inter.user.id) or inter.user  # Member object
     role     = guild.get_role(INACTIVE_ROLE_ID)
     channel  = guild.get_channel(INACTIVE_CH_ID)
 
-    if not role or not channel:
+    if role is None or channel is None:
         return await inter.response.send_message(
-            "Inactive role or channel missing in configuration.", ephemeral=True
+            "Inactive role or channel not configured.", ephemeral=True
         )
 
     until_ts = int(datetime.now(timezone.utc).timestamp()) + period.value * 86_400
 
+    # give role
     try:
         await member.add_roles(role, reason=f"Inactive – {reason} ({period.name})")
     except discord.Forbidden:
@@ -1017,24 +1025,28 @@ async def inactive_cmd(
             "I don’t have permission to add that role.", ephemeral=True
         )
 
+    # DB entry / update
     await db.add_inactive(member.id, until_ts)
 
+    # log to channel
     await channel.send(
         embed=(
             discord.Embed(
                 title="📴 Member marked Inactive",
                 description=(
-                    f"{member.mention} has been set to **Inactive** for "
-                    f"**{period.name}**.\n"
+                    f"{member.mention} has set themselves to **Inactive** "
+                    f"for **{period.name}**.\n"
                     f"**Reason:** {reason}"
                 ),
                 colour=discord.Color.light_gray(),
             )
-            .set_footer(text=f"Until <t:{until_ts}:R> • by {inter.user}")
+            .set_footer(text=f"Until <t:{until_ts}:R>")
         )
     )
 
-    await inter.response.send_message("Member marked inactive.", ephemeral=True)
+    await inter.response.send_message(
+        f"You are now marked as inactive for **{period.name}**.", ephemeral=True
+    )
 
 # ══════════════════════════════════════════════════════════════════════
 #  LEAVE / BAN ANNOUNCEMENTS (no @mentions)
