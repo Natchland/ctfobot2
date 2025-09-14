@@ -25,6 +25,8 @@ WELCOME_CHANNEL_ID = 1398659438960971876
 APPLICATION_CH_ID  = 1378081331686412468
 UNCOMPLETED_APP_ROLE_ID = 1390143545066917931   # “Uncompleted application”
 COMPLETED_APP_ROLE_ID   = 1398708167525011568   # “Completed application”
+INACTIVE_ROLE_ID = 1416864151829221446          # “Inactive”  role
+INACTIVE_CH_ID   = 1416865404860502026          # #inactive-players channel
 
 ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
@@ -100,7 +102,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS codes (
                 name   TEXT PRIMARY KEY,
                 pin    VARCHAR(4) NOT NULL,
-                public BOOLEAN    NOT NULL DEFAULT FALSE
+                public BOOLEAN     NOT NULL DEFAULT FALSE
             );
             CREATE TABLE IF NOT EXISTS reviewers (
                 user_id BIGINT PRIMARY KEY
@@ -128,7 +130,6 @@ class Database:
                 data       JSONB,
                 status     TEXT NOT NULL DEFAULT 'pending'
             );
-                               
             CREATE TABLE IF NOT EXISTS staff_applications (
                 id         SERIAL PRIMARY KEY,
                 user_id    BIGINT,
@@ -137,42 +138,15 @@ class Database:
                 status     TEXT NOT NULL DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT now()
             );
+            ------------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS inactive_members (           -- NEW
+                user_id  BIGINT PRIMARY KEY,
+                until_ts BIGINT                                     -- epoch
+            );
+            ------------------------------------------------------------------
 
             ALTER TABLE member_forms
-            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
-            """)
-            # ── NOTIFY for /codes edits → bot refresh ─────
-            await conn.execute("""
-            CREATE OR REPLACE FUNCTION notify_codes_changed()
-            RETURNS trigger AS $$
-            BEGIN
-                PERFORM pg_notify('codes_changed', 'refresh');
-                RETURN NEW;
-            END; $$ LANGUAGE plpgsql;
-            """)
-            await conn.execute("""
-            DROP TRIGGER IF EXISTS codes_changed_trigger ON codes;
-            CREATE TRIGGER codes_changed_trigger
-            AFTER INSERT OR UPDATE OR DELETE ON codes
-            FOR EACH STATEMENT
-            EXECUTE FUNCTION notify_codes_changed();
-            """)
-            # ── NOTIFY for /giveaways edits → bot refresh ──
-            await conn.execute("""
-            CREATE OR REPLACE FUNCTION notify_giveaways_changed()
-            RETURNS trigger AS $$
-            BEGIN
-                PERFORM pg_notify('giveaways_changed', NEW.id::text);
-                RETURN NEW;
-            END; $$ LANGUAGE plpgsql;
-            """)
-            await conn.execute("""
-            DROP TRIGGER IF EXISTS giveaways_changed_trigger ON giveaways;
-            CREATE TRIGGER giveaways_changed_trigger
-            AFTER UPDATE ON giveaways
-              FOR EACH ROW
-              WHEN (OLD.* IS DISTINCT FROM NEW.*)
-            EXECUTE FUNCTION notify_giveaways_changed();
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
             """)
 
     # ────────────────────────────────────────────────────────────────
@@ -260,6 +234,28 @@ class Database:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM activity")
             return {r["user_id"]: dict(r) for r in rows}
+        
+        # ───────────────── Inactive role helpers ─────────────────
+    async def add_inactive(self, uid: int, until_ts: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO inactive_members (user_id, until_ts) "
+                "VALUES ($1,$2) "
+                "ON CONFLICT (user_id) DO UPDATE SET until_ts=$2",
+                uid, until_ts
+            )
+
+    async def remove_inactive(self, uid: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM inactive_members WHERE user_id=$1", uid)
+
+    async def get_expired_inactive(self, now_ts: int):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM inactive_members WHERE until_ts <= $1",
+                now_ts
+            )
+            return [dict(r) for r in rows]
 
     # ────────────────────────────────────────────────────────────────
     #  GIVEAWAYS
@@ -570,72 +566,123 @@ async def on_voice_state_update(member, before, after):
 @tasks.loop(hours=24)
 async def activity_maintenance() -> None:
     """
-    Runs once per day.
-    1. Grants the Active-Member role to users whose streak is high enough.
-    2. Sends a warning message if they are about to lose the role.
-    3. Removes the role after prolonged inactivity.
+    Daily maintenance:
+      • promote / demote based on activity streak
+      • warn users about impending demotion
+      • kick users idle ≥14 days (unless exempt)
+      • auto-remove “Inactive” role when its period elapses and
+        reset that member’s activity so the kick timer restarts.
     """
     await bot.wait_until_ready()
 
-    guild   = bot.get_guild(GUILD_ID)
-    role    = guild.get_role(ACTIVE_MEMBER_ROLE_ID) if guild else None
-    warn_ch = guild.get_channel(WARNING_CH_ID) if guild else None
-    today   = date.today()
+    guild = bot.get_guild(GUILD_ID)
+    role_active   = guild.get_role(ACTIVE_MEMBER_ROLE_ID) if guild else None
+    role_inactive = guild.get_role(INACTIVE_ROLE_ID)      if guild else None
+    warn_ch       = guild.get_channel(WARNING_CH_ID) if guild else None
+    today         = date.today()
 
-    if not guild or not role:
-        print("[activity] Guild or role not found — skipping cycle")
+    if not guild or not role_active:
+        print("[activity] guild or Active-Member role missing – cycle skipped")
         return
 
-    records = await db.get_all_activity()           # {uid: dict}
-    promoted = demoted = warned_n = 0
+    records  = await db.get_all_activity()        # {uid: dict}
+    promoted = demoted = warned_n = kicked = unmarked = 0
 
     for uid, rec in records.items():
         member = guild.get_member(uid)
         if not member or member.bot:
             continue
 
-        # ---- 1) PROMOTE IF STREAK MET --------------------------------
-        if rec["streak"] >= PROMOTE_STREAK and role not in member.roles:
+        # ───────── PROMOTE ─────────
+        if rec["streak"] >= PROMOTE_STREAK and role_active not in member.roles:
             try:
-                await member.add_roles(role, reason="Reached activity streak (cron)")
+                await member.add_roles(role_active, reason="Reached activity streak")
                 promoted += 1
-                print(f"[PROMOTE] {member} (streak {rec['streak']})")
             except discord.Forbidden:
                 print(f"[PROMOTE] Missing perms for {member}")
 
-        # ---- compute inactivity --------------------------------------
-        days_idle = (today - rec["date"]).days
+        # ───────── INACTIVITY CALCS ─────────
+        days_idle      = (today - rec["date"]).days
         already_warned = rec["warned"]
 
-        # ---- 2) SEND WARNING ----------------------------------------
+        # warn 1 day before demotion
         if (
             days_idle == WARN_BEFORE_DAYS
-            and role in member.roles
+            and role_active in member.roles
             and not already_warned
         ):
             if warn_ch:
                 await warn_ch.send(
-                    f"{member.mention} You’ve been inactive for "
-                    f"{days_idle} days – please pop in or you’ll lose your role."
+                    f"{member.mention} You’ve been inactive for {days_idle} days — "
+                    "please pop in or you’ll lose your role."
                 )
-            await db.set_activity(
-                uid, rec["streak"], rec["date"], True, rec["last"]
-            )
+            await db.set_activity(uid, rec["streak"], rec["date"], True, rec["last"])
             warned_n += 1
 
-        # ---- 3) DEMOTE ----------------------------------------------
-        if days_idle >= INACTIVE_AFTER_DAYS and role in member.roles:
+        # demote after INACTIVE_AFTER_DAYS
+        if days_idle >= INACTIVE_AFTER_DAYS and role_active in member.roles:
             try:
-                await member.remove_roles(role, reason="Inactive > 5 days")
+                await member.remove_roles(role_active, reason="Inactive > 5 days")
                 demoted += 1
-                print(f"[DEMOTE] {member} – inactive {days_idle} days")
             except discord.Forbidden:
                 print(f"[DEMOTE] Missing perms for {member}")
             await db.set_activity(uid, 0, rec["date"], False, rec["last"])
 
+        # ───────── 14-DAY KICK (unless exempt) ─────────
+        exempt = (
+            member.guild_permissions.administrator
+            or (role_inactive in member.roles if role_inactive else False)
+            or (role_active in member.roles)
+            or any(r.id in (GROUP_LEADER_ID, PLAYER_MGMT_ID) for r in member.roles)
+        )
+        if not exempt and days_idle >= 14:
+            try:
+                await guild.kick(
+                    member,
+                    reason=f"Inactivity ≥14 days (last activity {rec['date']})"
+                )
+                kicked += 1
+                ch = guild.get_channel(INACTIVE_CH_ID)
+                if ch:
+                    await ch.send(f"👢 {member} was kicked for 14-day inactivity.")
+            except discord.Forbidden:
+                print(f"[KICK] Missing perms to kick {member}")
+
+    # ───────── Remove expired “Inactive” roles ─────────
+    now_ts  = int(datetime.now(timezone.utc).timestamp())
+    expired = await db.get_expired_inactive(now_ts)
+
+    for row in expired:                              # [{'user_id', 'until_ts'}]
+        member = guild.get_member(row["user_id"])
+        if not member:
+            await db.remove_inactive(row["user_id"])
+            continue
+
+        if role_inactive and role_inactive in member.roles:
+            try:
+                await member.remove_roles(role_inactive, reason="Inactive period elapsed")
+                unmarked += 1
+            except discord.Forbidden:
+                print(f"[INACTIVE] Can't remove role from {member}")
+
+        # reset activity so they start fresh
+        await db.set_activity(
+            member.id,               # uid
+            0,                       # streak
+            today,                   # date
+            False,                   # warned
+            datetime.now(timezone.utc)
+        )
+        await db.remove_inactive(member.id)
+
+        ch = guild.get_channel(INACTIVE_CH_ID)
+        if ch:
+            await ch.send(f"🔔 {member.mention} is no longer marked Inactive — welcome back!")
+
     print(
-        f"[activity] cycle complete: +{promoted} promoted, "
-        f"{warned_n} warned, –{demoted} demoted"
+        f"[activity] cycle: +{promoted} promoted, "
+        f"{warned_n} warned, –{demoted} demoted, "
+        f"👢{kicked} kicked, 🔔{unmarked} inactive-role removed"
     )
 # ============Welcome Message==============
 
@@ -927,6 +974,67 @@ async def resume_staff_applications():
 # ---- call it from on_ready() ----
 # after db.connect() and other resume calls:
 # await resume_staff_applications()
+
+# ───────────────────────────── /inactive ─────────────────────────────
+PERIOD_CHOICES: list[tuple[str, int]] = [
+    ("1 week", 7),
+    ("2 weeks", 14),
+    ("1 month", 30),
+    ("2 months", 60),
+]
+
+@bot.tree.command(name="inactive", description="Mark a member as temporarily inactive")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.choices(
+    period=[app_commands.Choice(name=n, value=d) for n, d in PERIOD_CHOICES]
+)
+@app_commands.describe(
+    member="Member to mark inactive",
+    period="How long they will be inactive",
+    reason="Reason for inactivity"
+)
+async def inactive_cmd(
+    inter:  discord.Interaction,
+    member: discord.Member,
+    period: app_commands.Choice[int],
+    reason: str
+):
+    guild    = inter.guild
+    role     = guild.get_role(INACTIVE_ROLE_ID)
+    channel  = guild.get_channel(INACTIVE_CH_ID)
+
+    if not role or not channel:
+        return await inter.response.send_message(
+            "Inactive role or channel missing in configuration.", ephemeral=True
+        )
+
+    until_ts = int(datetime.now(timezone.utc).timestamp()) + period.value * 86_400
+
+    try:
+        await member.add_roles(role, reason=f"Inactive – {reason} ({period.name})")
+    except discord.Forbidden:
+        return await inter.response.send_message(
+            "I don’t have permission to add that role.", ephemeral=True
+        )
+
+    await db.add_inactive(member.id, until_ts)
+
+    await channel.send(
+        embed=(
+            discord.Embed(
+                title="📴 Member marked Inactive",
+                description=(
+                    f"{member.mention} has been set to **Inactive** for "
+                    f"**{period.name}**.\n"
+                    f"**Reason:** {reason}"
+                ),
+                colour=discord.Color.light_gray(),
+            )
+            .set_footer(text=f"Until <t:{until_ts}:R> • by {inter.user}")
+        )
+    )
+
+    await inter.response.send_message("Member marked inactive.", ephemeral=True)
 
 # ══════════════════════════════════════════════════════════════════════
 #  LEAVE / BAN ANNOUNCEMENTS (no @mentions)
