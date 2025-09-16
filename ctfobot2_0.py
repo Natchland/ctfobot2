@@ -27,6 +27,7 @@ UNCOMPLETED_APP_ROLE_ID = 1390143545066917931   # “Uncompleted application”
 COMPLETED_APP_ROLE_ID   = 1398708167525011568   # “Completed application”
 INACTIVE_ROLE_ID = 1416864151829221446          # “Inactive”  role
 INACTIVE_CH_ID   = 1416865404860502026          # #inactive-players channel
+RECRUITMENT_ID  = 1410659214959054988
 
 ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
@@ -629,12 +630,15 @@ async def activity_maintenance() -> None:
             await db.set_activity(uid, 0, rec["date"], False, rec["last"])
 
         # ───────── 14-DAY KICK (unless exempt) ─────────
+        
         exempt = (
             member.guild_permissions.administrator
             or (role_inactive in member.roles if role_inactive else False)
             or (role_active in member.roles)
-            or any(r.id in (GROUP_LEADER_ID, PLAYER_MGMT_ID) for r in member.roles)
+            or any(r.id in (GROUP_LEADER_ID, PLAYER_MGMT_ID, RECRUITMENT_ID, ADMIN_ID)
+                   for r in member.roles)            # ← Recruitment added
         )
+
         if not exempt and days_idle >= 14:
             try:
                 await guild.kick(
