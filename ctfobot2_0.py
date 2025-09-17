@@ -1707,7 +1707,7 @@ def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False
 
 
 def eligible(guild: discord.Guild):
-    role = guild.get_role(GIVEAWAY_ROLE_ID)
+    role = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
     return [m for m in role.members if not m.bot] if role else []
 
 async def tickets_for_entrants(
