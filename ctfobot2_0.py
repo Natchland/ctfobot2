@@ -91,6 +91,15 @@ intents.message_content = True
 
 bot = CTFBot(command_prefix="!", intents=intents)
 
+async def ensure_member_cache(guild: discord.Guild):
+    """
+    Make sure the bot’s member cache is filled so role.members works.
+    Does nothing if the cache is already populated.
+    """
+    if guild.large and len(guild._members) == 0:      # type: ignore
+        # Force a guild chunk – this populates role.members
+        await guild.chunk(cache=True)
+
 # ══════════════════════════════════════════════════════════════════════
 #                                DATABASE
 # ══════════════════════════════════════════════════════════════════════
@@ -1717,6 +1726,7 @@ async def tickets_for_entrants(
     """
     Calculate ticket totals from `start_dt` forward.
     """
+    await ensure_member_cache(guild)
     members = eligible(guild)
     if not members:
         return {}
@@ -2022,6 +2032,7 @@ async def giveaway(inter: discord.Interaction,
     await db.add_giveaway(channel.id, message.id, prize, start_ts, end_ts)
 
     # immediately fill entrant list
+    await ensure_member_cache(guild)
     entrants_now = await tickets_for_entrants(guild, message.created_at.replace(tzinfo=timezone.utc))
     entrants_txt = "\n".join(f"• {m.mention} – **{n}**" for m, n in entrants_now.items()) or "*None yet*"
     put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
