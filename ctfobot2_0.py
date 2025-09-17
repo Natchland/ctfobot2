@@ -131,6 +131,7 @@ class Database:
                 channel_id BIGINT,
                 message_id BIGINT,
                 prize      TEXT,
+                start_ts   BIGINT,          -- NEW  (epoch when msg created)
                 end_ts     BIGINT,
                 active     BOOLEAN,
                 note       TEXT
@@ -272,15 +273,13 @@ class Database:
     # ────────────────────────────────────────────────────────────────
     #  GIVEAWAYS
     # ────────────────────────────────────────────────────────────────
-    async def add_giveaway(self, ch_id, msg_id, prize, end_ts):
+    async def add_giveaway(self, ch_id, msg_id, prize, start_ts, end_ts):
         async with self.pool.acquire() as conn:
             await conn.execute(
-                """
-                INSERT INTO giveaways
-                (channel_id, message_id, prize, end_ts, active)
-                VALUES ($1,$2,$3,$4,TRUE)
-                """,
-                ch_id, msg_id, prize, end_ts
+                "INSERT INTO giveaways "
+                "(channel_id, message_id, prize, start_ts, end_ts, active) "
+                "VALUES ($1,$2,$3,$4,$5,TRUE)",
+                ch_id, msg_id, prize, start_ts, end_ts
             )
 
     async def end_giveaway(self, msg_id):
@@ -1714,40 +1713,39 @@ def eligible(guild: discord.Guild):
     role = guild.get_role(GIVEAWAY_ROLE_ID)
     return [m for m in role.members if not m.bot] if role else []
 
-async def tickets_for_entrants(guild: discord.Guild) -> dict[discord.Member, int]:
+async def tickets_for_entrants(
+    guild: discord.Guild,
+    start_dt: datetime               # giveaway start
+) -> dict[discord.Member, int]:
     """
-    Return {member: ticket_count} for everyone returned by eligible(guild).
+    Calculate ticket totals from `start_dt` forward.
     """
-    base_pool = eligible(guild)          # Active-Member role holders
-    if not base_pool:
+    members = eligible(guild)
+    if not members:
         return {}
 
-    # fetch *all* activity rows once, to avoid many DB calls
-    activity_rows = await db.get_all_activity()     # {uid: dict}
+    activity_rows = await db.get_all_activity()
     now           = datetime.now(timezone.utc)
-
     tickets: dict[discord.Member, int] = {}
 
-    for m in base_pool:
-        total = 1                                   # base ticket
+    for m in members:
+        total = 1                                           # base ticket
 
         # ---- activity streak bonus ----
         rec = activity_rows.get(m.id)
         if rec:
             total += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
 
-        # ---- server boost bonus ----
+        # ---- booster bonus ----
         if m.premium_since:
-            weeks_boosting = (now - m.premium_since).days // 7
-            total += weeks_boosting * BOOST_BONUS_PER_WEEK
+            effective = max(m.premium_since, start_dt)
+            total += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
 
         # ---- staff role bonus ----
         if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
-            joined = m.joined_at or now
-            weeks_staff = (now - joined).days // 7
-            total += weeks_staff * STAFF_BONUS_PER_WEEK
+            total += ((now - start_dt).days // 7) * STAFF_BONUS_PER_WEEK
 
-        tickets[m] = max(total, 1)      # safety
+        tickets[m] = total
     return tickets
 
 # ═════════════════════ GIVEAWAY REFRESHER (panel-driven) ═════════════
@@ -1840,7 +1838,20 @@ class GiveawayControl(discord.ui.View):
         if not self._admin(inter.user):
             return await inter.response.send_message("Not authorised.", ephemeral=True)
 
-        tickets = await tickets_for_entrants(self.guild)
+        # fetch start_ts (with same back-fill safety)
+        start_ts = await db.pool.fetchval(
+            "SELECT start_ts FROM giveaways WHERE message_id=$1", self.msg_id
+        )
+        if not start_ts:
+            msg = await self.guild.get_channel(self.ch_id).fetch_message(self.msg_id)
+            start_ts = int(msg.created_at.replace(tzinfo=timezone.utc).timestamp())
+            await db.pool.execute(
+                "UPDATE giveaways SET start_ts=$1 WHERE message_id=$2",
+                start_ts, self.msg_id
+            )
+        start_dt = datetime.fromtimestamp(start_ts, timezone.utc)
+
+        tickets = await tickets_for_entrants(self.guild, start_dt)
         chan    = self.guild.get_channel(self.ch_id)
 
         if not tickets:
@@ -1849,7 +1860,7 @@ class GiveawayControl(discord.ui.View):
             return await inter.response.send_message("Ended.", ephemeral=True)
 
         import random
-        population, weights = zip(*[(m, t) for m, t in tickets.items()])
+        population, weights = zip(*tickets.items())
         winner = random.choices(population, weights, k=1)[0]
 
         await chan.send(
@@ -1874,8 +1885,8 @@ class GiveawayControl(discord.ui.View):
 
 async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
     """
-    Updates timer & entrant list; when time is up, draws a winner weighted
-    by ticket counts.
+    Periodically updates the embed; when time expires draws a winner
+    weighted by ticket counts that start at giveaway creation.
     """
     channel = guild.get_channel(ch_id)
     if not channel:
@@ -1885,11 +1896,24 @@ async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
     except discord.NotFound:
         return
 
-    last_display = None  # to avoid needless edits
+    # ----- fetch / back-fill start_ts --------------------------------
+    row = await db.pool.fetchrow(
+        "SELECT start_ts FROM giveaways WHERE message_id=$1", msg_id
+    )
+    if row and row["start_ts"]:
+        start_dt = datetime.fromtimestamp(row["start_ts"], timezone.utc)
+    else:
+        start_dt = message.created_at.replace(tzinfo=timezone.utc)
+        await db.pool.execute(
+            "UPDATE giveaways SET start_ts=$1 WHERE message_id=$2",
+            int(start_dt.timestamp()), msg_id
+        )
+
+    last_display: str | None = None
 
     while not stop.is_set():
-        now = int(datetime.now(timezone.utc).timestamp())
-        remaining = end_ts - now
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        remaining = end_ts - now_ts
         if remaining <= 0:
             break
 
@@ -1897,10 +1921,9 @@ async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
         if display != last_display:
             last_display = display
 
-            tickets = await tickets_for_entrants(guild)
+            tickets = await tickets_for_entrants(guild, start_dt)
             entrants_txt = (
-                "\n".join(f"• {m.mention} – **{n}**"
-                          for m, n in tickets.items())
+                "\n".join(f"• {m.mention} – **{n}**" for m, n in tickets.items())
                 or "*None yet*"
             )
 
@@ -1915,19 +1938,18 @@ async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
 
         await asyncio.sleep(1 if remaining <= 10 else 10 if remaining <= 300 else 30)
 
-    # -------- Draw winner (unless cancelled) --------
     if stop.is_set():
         return
 
-    tickets = await tickets_for_entrants(guild)
+    tickets = await tickets_for_entrants(guild, start_dt)
     if not tickets:
         await channel.send("No eligible entrants.")
         await db.end_giveaway(msg_id)
         return
 
     import random
-    population, weights = zip(*[(m, t) for m, t in tickets.items()])
-    winner = random.choices(population=population, weights=weights, k=1)[0]
+    population, weights = zip(*tickets.items())
+    winner = random.choices(population, weights, k=1)[0]
 
     await channel.send(
         embed=discord.Embed(
@@ -2005,6 +2027,9 @@ async def giveaway(inter: discord.Interaction,
     message = await channel.send(embed=embed, view=view)
     view.msg_id = view.message_id = message.id
     bot.add_view(view, message_id=message.id)
+
+    start_ts = int(message.created_at.replace(tzinfo=timezone.utc).timestamp())
+    await db.add_giveaway(channel.id, message.id, prize, start_ts, end_ts)
 
     await db.add_giveaway(channel.id, message.id, prize, end_ts)
     asyncio.create_task(
