@@ -131,13 +131,14 @@ class Database:
                 channel_id BIGINT,
                 message_id BIGINT,
                 prize      TEXT,
-                start_ts   BIGINT,          -- NEW  (epoch when msg created)
+                start_ts   BIGINT,      -- epoch when msg created
                 end_ts     BIGINT,
                 active     BOOLEAN,
                 note       TEXT
-            ALTER TABLE giveaways
-                ADD COLUMN IF NOT EXISTS start_ts BIGINT;
             );
+            ALTER TABLE giveaways
+            ADD COLUMN IF NOT EXISTS start_ts BIGINT;
+
             CREATE TABLE IF NOT EXISTS member_forms (
                 id         SERIAL PRIMARY KEY,
                 user_id    BIGINT,
@@ -154,14 +155,14 @@ class Database:
                 created_at TIMESTAMP DEFAULT now()
             );
             ------------------------------------------------------------------
-            CREATE TABLE IF NOT EXISTS inactive_members (           -- NEW
+            CREATE TABLE IF NOT EXISTS inactive_members (
                 user_id  BIGINT PRIMARY KEY,
-                until_ts BIGINT                                     -- epoch
+                until_ts BIGINT           -- epoch
             );
             ------------------------------------------------------------------
 
             ALTER TABLE member_forms
-              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
             """)
 
     # ────────────────────────────────────────────────────────────────
@@ -2033,7 +2034,6 @@ async def giveaway(inter: discord.Interaction,
     start_ts = int(message.created_at.replace(tzinfo=timezone.utc).timestamp())
     await db.add_giveaway(channel.id, message.id, prize, start_ts, end_ts)
 
-    await db.add_giveaway(channel.id, message.id, prize, end_ts)
     asyncio.create_task(
         run_giveaway(guild, channel.id, message.id, prize, end_ts, stop)
     )
