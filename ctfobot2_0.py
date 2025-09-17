@@ -48,8 +48,6 @@ GIVEAWAY_ROLE_ID    = 1403337937722019931
 GIVEAWAY_CH_ID      = 1413929735658016899
 CODES_CH_ID         = 1398667158237483138
 EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
-FOOTER_END_TAG      = "END:"
-FOOTER_PRIZE_TAG    = "PRIZE:"
 PROMOTE_STREAK      = 3
 INACTIVE_AFTER_DAYS = 5
 WARN_BEFORE_DAYS    = INACTIVE_AFTER_DAYS - 1
@@ -111,59 +109,55 @@ class Database:
     async def init_tables(self):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-            CREATE TABLE IF NOT EXISTS codes (
-                name   TEXT PRIMARY KEY,
-                pin    VARCHAR(4) NOT NULL,
-                public BOOLEAN     NOT NULL DEFAULT FALSE
-            );
-            CREATE TABLE IF NOT EXISTS reviewers (
-                user_id BIGINT PRIMARY KEY
-            );
-            CREATE TABLE IF NOT EXISTS activity (
-                user_id BIGINT PRIMARY KEY,
-                streak  INTEGER,
-                date    DATE,
-                warned  BOOLEAN,
-                last    TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS giveaways (
-                id         SERIAL PRIMARY KEY,
-                channel_id BIGINT,
-                message_id BIGINT,
-                prize      TEXT,
-                start_ts   BIGINT,      -- epoch when msg created
-                end_ts     BIGINT,
-                active     BOOLEAN,
-                note       TEXT
-            );
-            ALTER TABLE giveaways
-            ADD COLUMN IF NOT EXISTS start_ts BIGINT;
+    CREATE TABLE IF NOT EXISTS codes (
+        name   TEXT PRIMARY KEY,
+        pin    VARCHAR(4) NOT NULL,
+        public BOOLEAN     NOT NULL DEFAULT FALSE
+    );
+    CREATE TABLE IF NOT EXISTS reviewers (user_id BIGINT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS activity  (
+        user_id BIGINT PRIMARY KEY,
+        streak  INTEGER,
+        date    DATE,
+        warned  BOOLEAN,
+        last    TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS giveaways (
+        id         SERIAL PRIMARY KEY,
+        channel_id BIGINT,
+        message_id BIGINT,
+        prize      TEXT,
+        start_ts   BIGINT,
+        end_ts     BIGINT,
+        active     BOOLEAN,
+        note       TEXT
+    );
+    -- in case the column is missing on an old table:
+    ALTER TABLE giveaways
+        ADD COLUMN IF NOT EXISTS start_ts BIGINT;
 
-            CREATE TABLE IF NOT EXISTS member_forms (
-                id         SERIAL PRIMARY KEY,
-                user_id    BIGINT,
-                created_at TIMESTAMP DEFAULT now(),
-                data       JSONB,
-                status     TEXT NOT NULL DEFAULT 'pending'
-            );
-            CREATE TABLE IF NOT EXISTS staff_applications (
-                id         SERIAL PRIMARY KEY,
-                user_id    BIGINT,
-                role       TEXT,
-                message_id BIGINT,
-                status     TEXT NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT now()
-            );
-            ------------------------------------------------------------------
-            CREATE TABLE IF NOT EXISTS inactive_members (
-                user_id  BIGINT PRIMARY KEY,
-                until_ts BIGINT           -- epoch
-            );
-            ------------------------------------------------------------------
-
-            ALTER TABLE member_forms
-            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
-            """)
+    CREATE TABLE IF NOT EXISTS member_forms (
+        id         SERIAL PRIMARY KEY,
+        user_id    BIGINT,
+        created_at TIMESTAMP DEFAULT now(),
+        data       JSONB,
+        status     TEXT NOT NULL DEFAULT 'pending'
+    );
+    CREATE TABLE IF NOT EXISTS staff_applications (
+        id         SERIAL PRIMARY KEY,
+        user_id    BIGINT,
+        role       TEXT,
+        message_id BIGINT,
+        status     TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS inactive_members (
+        user_id  BIGINT PRIMARY KEY,
+        until_ts BIGINT
+    );
+    ALTER TABLE member_forms
+        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+    """)
 
     # ────────────────────────────────────────────────────────────────
     #  CODES helpers
@@ -1783,8 +1777,6 @@ async def refresh_giveaway_from_row(row: dict):
 
     # Still running
     put_field(embed, 1, name="Time left", value=f"**{fmt_time(remaining)}**", inline=False)
-    embed.set_footer(text=f"{FOOTER_END_TAG}{row['end_ts']}|{FOOTER_PRIZE_TAG}{row['prize']}")
-    await msg.edit(embed=embed)
 
 
 async def listen_for_giveaway_changes():
@@ -1999,10 +1991,10 @@ async def resume_giveaways():
 async def giveaway(inter: discord.Interaction,
                    duration: app_commands.Choice[int],
                    prize: str):
-    # acknowledge right away to avoid 3-second limit
+
     await inter.response.defer(ephemeral=True)
 
-    guild = inter.guild
+    guild   = inter.guild
     channel = guild.get_channel(GIVEAWAY_CH_ID)
     role    = guild.get_role(GIVEAWAY_ROLE_ID)
     if not channel or not role:
@@ -2013,34 +2005,33 @@ async def giveaway(inter: discord.Interaction,
     end_ts = int(datetime.now(timezone.utc).timestamp()) + duration.value * 86_400
     stop   = asyncio.Event()
 
-    embed = discord.Embed(title="🎉 GIVEAWAY 🎉",
-                          colour=discord.Color.blurple())
-    embed.add_field(name="Prize",             value=f"**{prize}**",
-                    inline=False)
-    embed.add_field(name="Time left",         value=f"**{duration.name}**",
-                    inline=False)
-    embed.add_field(name="Eligibility",
-                    value=f"Only {role.mention} can win.",
-                    inline=False)
-    embed.add_field(name="Eligible Entrants", value="*Updating…*",
-                    inline=False)
-    embed.set_footer(text=f"||END:{end_ts}|PRIZE:{prize}||")
+    embed = (discord.Embed(title="🎉 GIVEAWAY 🎉", colour=discord.Color.blurple())
+             .add_field(name="Prize",      value=f"**{prize}**",        inline=False)
+             .add_field(name="Time left",  value=f"**{duration.name}**",inline=False)
+             .add_field(name="Eligibility",
+                        value=f"Only {role.mention} can win.",           inline=False)
+             .add_field(name="Eligible Entrants", value="*Updating…*",   inline=False))
 
-    view = GiveawayControl(guild, channel.id, 0, prize, stop)
+    view    = GiveawayControl(guild, channel.id, 0, prize, stop)
     message = await channel.send(embed=embed, view=view)
     view.msg_id = view.message_id = message.id
     bot.add_view(view, message_id=message.id)
 
+    # write DB record
     start_ts = int(message.created_at.replace(tzinfo=timezone.utc).timestamp())
     await db.add_giveaway(channel.id, message.id, prize, start_ts, end_ts)
+
+    # immediately fill entrant list
+    entrants_now = await tickets_for_entrants(guild, message.created_at.replace(tzinfo=timezone.utc))
+    entrants_txt = "\n".join(f"• {m.mention} – **{n}**" for m, n in entrants_now.items()) or "*None yet*"
+    put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
+    await message.edit(embed=embed)
 
     asyncio.create_task(
         run_giveaway(guild, channel.id, message.id, prize, end_ts, stop)
     )
 
-    await inter.followup.send(
-        f"Giveaway started in {channel.mention}.", ephemeral=True
-    )
+    await inter.followup.send(f"Giveaway started in {channel.mention}.", ephemeral=True)
 # ──────────────────────────────────────────────────────────────────────
 
 # ════════════════════════ on_ready & startup ══════════════════════════
