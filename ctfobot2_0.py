@@ -17,7 +17,6 @@ BOT_TOKEN      = os.getenv("BOT_TOKEN")
 DATABASE_URL   = os.getenv("DATABASE_URL")
 GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
 ACTIVE_MEMBER_ROLE_ID = 1403337937722019931
-
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1378118620873494548
 WARNING_CH_ID  = 1398657081338237028
@@ -28,7 +27,6 @@ COMPLETED_APP_ROLE_ID   = 1398708167525011568   # “Completed application”
 INACTIVE_ROLE_ID = 1416864151829221446          # “Inactive”  role
 INACTIVE_CH_ID   = 1416865404860502026          # #inactive-players channel
 RECRUITMENT_ID  = 1410659214959054988
-
 ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
     "North America": 1411364406096433212,
@@ -43,6 +41,7 @@ FOCUS_ROLE_IDS = {
     "Electricity":  1380233234675400875,
     "PvP":          1408687710159245362,
 }
+
 
 TEMP_BAN_SECONDS    = 7 * 24 * 60 * 60
 GIVEAWAY_ROLE_ID    = 1403337937722019931
@@ -62,6 +61,18 @@ PLAYER_MGMT_ID  = 1377084533706588201
 TRUSTED_ID      = 1400584430900219935
 
 CODE_NAMES = ["Master", "Guest", "Electrician", "Other"]
+
+# staff roles that give weekly bonus tickets
+STAFF_BONUS_ROLE_IDS = {
+    ADMIN_ID,
+    GROUP_LEADER_ID,
+    PLAYER_MGMT_ID,
+    RECRUITMENT_ID,
+}
+
+BOOST_BONUS_PER_WEEK  = 3
+STAFF_BONUS_PER_WEEK  = 3
+STREAK_BONUS_PER_SET  = 3      # every 3-day set gives +3
 
 # ══════════════════════════════════════════════════════════════════════
 #                             BOT / INTENTS
@@ -236,7 +247,7 @@ class Database:
             rows = await conn.fetch("SELECT * FROM activity")
             return {r["user_id"]: dict(r) for r in rows}
         
-        # ───────────────── Inactive role helpers ─────────────────
+    # ───────────────── Inactive role helpers ─────────────────
     async def add_inactive(self, uid: int, until_ts: int):
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -1703,6 +1714,42 @@ def eligible(guild: discord.Guild):
     role = guild.get_role(GIVEAWAY_ROLE_ID)
     return [m for m in role.members if not m.bot] if role else []
 
+async def tickets_for_entrants(guild: discord.Guild) -> dict[discord.Member, int]:
+    """
+    Return {member: ticket_count} for everyone returned by eligible(guild).
+    """
+    base_pool = eligible(guild)          # Active-Member role holders
+    if not base_pool:
+        return {}
+
+    # fetch *all* activity rows once, to avoid many DB calls
+    activity_rows = await db.get_all_activity()     # {uid: dict}
+    now           = datetime.now(timezone.utc)
+
+    tickets: dict[discord.Member, int] = {}
+
+    for m in base_pool:
+        total = 1                                   # base ticket
+
+        # ---- activity streak bonus ----
+        rec = activity_rows.get(m.id)
+        if rec:
+            total += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
+
+        # ---- server boost bonus ----
+        if m.premium_since:
+            weeks_boosting = (now - m.premium_since).days // 7
+            total += weeks_boosting * BOOST_BONUS_PER_WEEK
+
+        # ---- staff role bonus ----
+        if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
+            joined = m.joined_at or now
+            weeks_staff = (now - joined).days // 7
+            total += weeks_staff * STAFF_BONUS_PER_WEEK
+
+        tickets[m] = max(total, 1)      # safety
+    return tickets
+
 # ═════════════════════ GIVEAWAY REFRESHER (panel-driven) ═════════════
 async def refresh_giveaway_from_row(row: dict):
     """
@@ -1791,20 +1838,27 @@ class GiveawayControl(discord.ui.View):
                        emoji="🎰", custom_id="gw_end")
     async def end(self, inter: discord.Interaction, _):
         if not self._admin(inter.user):
-            return await inter.response.send_message("Not authorised.",
-                                                     ephemeral=True)
-        chan = self.guild.get_channel(self.ch_id)
-        winner = choice(eligible(self.guild)) if eligible(self.guild) else None
-        if winner:
-            await chan.send(
-                embed=discord.Embed(
-                    title=f"🎉 {self.prize} – WINNER 🎉",
-                    description=f"Congrats {winner.mention}! Enjoy **{self.prize}**!",
-                    colour=discord.Color.gold(),
-                )
-            )
-        else:
+            return await inter.response.send_message("Not authorised.", ephemeral=True)
+
+        tickets = await tickets_for_entrants(self.guild)
+        chan    = self.guild.get_channel(self.ch_id)
+
+        if not tickets:
             await chan.send("No eligible entrants.")
+            await self._finish("ENDED", discord.Color.dark_gray())
+            return await inter.response.send_message("Ended.", ephemeral=True)
+
+        import random
+        population, weights = zip(*[(m, t) for m, t in tickets.items()])
+        winner = random.choices(population, weights, k=1)[0]
+
+        await chan.send(
+            embed=discord.Embed(
+                title=f"🎉 {self.prize} – WINNER 🎉",
+                description=f"Congrats {winner.mention}! Enjoy **{self.prize}**!",
+                colour=discord.Color.gold(),
+            )
+        )
         await self._finish("ENDED", discord.Color.dark_gray())
         await inter.response.send_message("Ended.", ephemeral=True)
 
@@ -1820,19 +1874,18 @@ class GiveawayControl(discord.ui.View):
 
 async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
     """
-    Background task that updates the timer field and, when time is up,
-    announces the winner (unless the giveaway was ended/cancelled manually).
+    Updates timer & entrant list; when time is up, draws a winner weighted
+    by ticket counts.
     """
     channel = guild.get_channel(ch_id)
     if not channel:
         return
-
     try:
         message = await channel.fetch_message(msg_id)
     except discord.NotFound:
         return
 
-    last_display = None  # cache to avoid needless edits
+    last_display = None  # to avoid needless edits
 
     while not stop.is_set():
         now = int(datetime.now(timezone.utc).timestamp())
@@ -1843,9 +1896,15 @@ async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
         display = fmt_time(remaining)
         if display != last_display:
             last_display = display
-            embed = message.embeds[0]
 
-            entrants_txt = "\n".join(m.mention for m in eligible(guild)) or "*None yet*"
+            tickets = await tickets_for_entrants(guild)
+            entrants_txt = (
+                "\n".join(f"• {m.mention} – **{n}**"
+                          for m, n in tickets.items())
+                or "*None yet*"
+            )
+
+            embed = message.embeds[0]
             put_field(embed, 1, name="Time left", value=f"**{display}**")
             put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
 
@@ -1854,27 +1913,29 @@ async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
             except discord.HTTPException:
                 pass
 
-        # dynamic sleep: 30s (>5 min), 10s (5 min-10 s), 1s (≤10 s)
-        sleep_for = 1 if remaining <= 10 else 10 if remaining <= 300 else 30
-        await asyncio.sleep(sleep_for)
+        await asyncio.sleep(1 if remaining <= 10 else 10 if remaining <= 300 else 30)
 
-    # ---------- time expired ----------
-    if stop.is_set():            # ended or cancelled manually
+    # -------- Draw winner (unless cancelled) --------
+    if stop.is_set():
         return
 
-    pool = eligible(guild)
-    if pool:
-        winner = choice(pool)
-        await channel.send(
-            embed=discord.Embed(
-                title=f"🎉 {prize} – WINNER 🎉",
-                description=f"Congratulations {winner.mention}! You won **{prize}**!",
-                colour=discord.Color.gold(),
-            )
-        )
-    else:
+    tickets = await tickets_for_entrants(guild)
+    if not tickets:
         await channel.send("No eligible entrants.")
+        await db.end_giveaway(msg_id)
+        return
 
+    import random
+    population, weights = zip(*[(m, t) for m, t in tickets.items()])
+    winner = random.choices(population=population, weights=weights, k=1)[0]
+
+    await channel.send(
+        embed=discord.Embed(
+            title=f"🎉 {prize} – WINNER 🎉",
+            description=f"Congratulations {winner.mention}! You won **{prize}**!",
+            colour=discord.Color.gold(),
+        )
+    )
     await db.end_giveaway(msg_id)
 
 
