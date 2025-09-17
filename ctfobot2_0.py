@@ -135,6 +135,8 @@ class Database:
                 end_ts     BIGINT,
                 active     BOOLEAN,
                 note       TEXT
+            ALTER TABLE giveaways
+                ADD COLUMN IF NOT EXISTS start_ts BIGINT;
             );
             CREATE TABLE IF NOT EXISTS member_forms (
                 id         SERIAL PRIMARY KEY,
