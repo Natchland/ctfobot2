@@ -844,9 +844,11 @@ class StaffApplicationModal(discord.ui.Modal):
 
     async def on_submit(self, inter: discord.Interaction):
         # cache answers from this page
-        for comp in self.children:                           # type: ignore
-            self.collected.append((comp.label, comp.value))  # type: ignore
-
+        for comp in self.children:                                  # type: ignore
+            label_text = getattr(comp, "label", None)
+            if label_text is None:                                  # future discord.py
+                label_text = comp._underlying.label                 # fallback
+            self.collected.append((label_text, comp.value))         # type: ignore
         next_idx = self.idx + 5
         if next_idx < len(STAFF_QUESTION_SETS[self.role]):
             await inter.response.send_message(
