@@ -824,11 +824,9 @@ class ContinueView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="➡️")
     async def continue_btn(self, inter: discord.Interaction, _):
-        # Open next modal page
         await inter.response.send_modal(
-            StaffApplicationModal(self.role_name, self.next_index, self.collected)
+            StaffApplicationModal(self.role_name, self.next_index, list(self.collected))
         )
-        # disable button so it can't be double-clicked
         for child in self.children:
             child.disabled = True
         await inter.message.edit(view=self)
@@ -841,6 +839,9 @@ class StaffApplicationModal(discord.ui.Modal):
         self.idx        = idx           # start index into question list
         self.collected  = collected     # previous Q&A pairs
 
+        # Optional debugging
+        # print(f"StaffApplicationModal: {role_name} idx={idx}, questions={len(STAFF_QUESTION_SETS[role_name][idx:idx+5])}")
+
         for q, style, req in STAFF_QUESTION_SETS[role_name][idx : idx + 5]:
             self.add_item(discord.ui.TextInput(label=q, style=style, required=req))
 
@@ -851,10 +852,9 @@ class StaffApplicationModal(discord.ui.Modal):
 
         next_idx = self.idx + 5
         if next_idx < len(STAFF_QUESTION_SETS[self.role_name]):
-            # more questions → send Continue button
             await inter.response.send_message(
                 "Page saved — click **Continue** to answer the next set:",
-                view=ContinueView(self.role_name, next_idx, self.collected),
+                view=ContinueView(self.role_name, next_idx, list(self.collected)),
                 ephemeral=True
             )
             return
