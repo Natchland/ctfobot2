@@ -760,7 +760,7 @@ STAFF_ROLE_IDS: dict[str, int] = {
 }
 
 # ───────────────────────  QUESTIONS  ───────────────────────
-# tuple = (label, style, required)   – every label ≤ 45 chars
+# tuple = (label, style, required)  LABEL **≤45 chars**
 STAFF_QUESTION_SETS: dict[str, list[tuple[str, discord.TextStyle, bool]]] = {
     "Group Leader": [
         ("What group are you looking to lead?",          discord.TextStyle.short,     True),
@@ -773,19 +773,21 @@ STAFF_QUESTION_SETS: dict[str, list[tuple[str, discord.TextStyle, bool]]] = {
         ("How would you rate your in-game skills?",      discord.TextStyle.short,     True),
         ("How old are you?",                             discord.TextStyle.short,     True),
     ],
+
     "Player Management": [
-        ("Why do you want to join player management?",       discord.TextStyle.paragraph, True),
-        ("What makes you good for this role?",               discord.TextStyle.paragraph, True),
-        ("Describe your leadership skills.",                 discord.TextStyle.paragraph, True),
-        ("How would you deal with someone breaking rules?",  discord.TextStyle.paragraph, True),
-        ("How would you handle an unpopular decision?",      discord.TextStyle.paragraph, True),
-        ("How would you handle a player who irritates you?", discord.TextStyle.paragraph, True),
-        ("If you felt annoyed or upset, what would you do?", discord.TextStyle.paragraph, True),
-        ("What time-zone are you in?",                       discord.TextStyle.short,     True),
-        ("How many hours a week are you active?",            discord.TextStyle.short,     True),
-        ("When are you most active?",                        discord.TextStyle.short,     True),
-        ("How old are you?",                                 discord.TextStyle.short,     True),
+        ("Why do you want to join player management?",        discord.TextStyle.paragraph, True),
+        ("What makes you good for this role?",                discord.TextStyle.paragraph, True),
+        ("Describe your leadership skills.",                  discord.TextStyle.paragraph, True),
+        ("How would you handle breaking of rules?",           discord.TextStyle.paragraph, True),
+        ("How would you handle an unpopular decision?",       discord.TextStyle.paragraph, True),
+        ("How would you handle an irritating player?",        discord.TextStyle.paragraph, True),
+        ("What would you do if you felt annoyed?",            discord.TextStyle.paragraph, True),
+        ("What time-zone are you in?",                        discord.TextStyle.short,     True),
+        ("How many hours a week are you active?",             discord.TextStyle.short,     True),
+        ("When are you most active?",                         discord.TextStyle.short,     True),
+        ("How old are you?",                                  discord.TextStyle.short,     True),
     ],
+
     "Recruitment": [
         ("Why do you want this role?",                        discord.TextStyle.paragraph, True),
         ("What time-zone are you in?",                        discord.TextStyle.short,     True),
@@ -835,13 +837,13 @@ class StaffApplicationModal(discord.ui.Modal):
         super().__init__(title=f"{role} Application")
         self.role, self.idx, self.collected = role, idx, collected
 
-        qset = STAFF_QUESTION_SETS[role][idx : idx + 5]
+        qset = STAFF_QUESTION_SETS[role][idx: idx + 5]
         for q, style, req in qset:
             assert len(q) <= 45, f"Modal label >45 chars: {q}"
             self.add_item(discord.ui.TextInput(label=q, style=style, required=req))
 
     async def on_submit(self, inter: discord.Interaction):
-        # store answers from this page
+        # cache answers from this page
         for comp in self.children:                           # type: ignore
             self.collected.append((comp.label, comp.value))  # type: ignore
 
@@ -855,8 +857,7 @@ class StaffApplicationModal(discord.ui.Modal):
             return
 
         # ───────── all questions answered: build embed ─────────
-        guild     = inter.guild
-        review_ch = guild.get_channel(STAFF_APPLICATION_CH_ID)
+        review_ch = inter.guild.get_channel(STAFF_APPLICATION_CH_ID)
         if not review_ch:
             return await inter.response.send_message("Review channel missing.", ephemeral=True)
 
@@ -872,7 +873,7 @@ class StaffApplicationModal(discord.ui.Modal):
             embed.add_field(name=f"{i}. {q}", value=a or "N/A", inline=False)
         embed.set_footer(text=f"User ID: {inter.user.id}")
 
-        view = StaffApplicationActionView(guild, inter.user.id, self.role)
+        view = StaffApplicationActionView(inter.guild, inter.user.id, self.role)
         msg  = await review_ch.send(f"<@&{ADMIN_ROLE_ID}>", embed=embed, view=view)
 
         await db.add_staff_app(inter.user.id, self.role, msg.id)
@@ -891,19 +892,15 @@ class StaffApplicationActionView(discord.ui.View):
     async def _notify(self, txt: str):
         user = await safe_fetch(self.guild, self.applicant_id)
         if user:
-            try:
-                await user.send(txt)
-            except discord.Forbidden:
-                pass
+            try:    await user.send(txt)
+            except discord.Forbidden: pass
 
     async def _finish(self, inter: discord.Interaction, colour: discord.Colour):
         emb = inter.message.embeds[0]
         emb.colour = colour
-        for c in self.children:
-            c.disabled = True
+        for c in self.children: c.disabled = True
         await inter.message.edit(embed=emb, view=self)
 
-    # ---------- accept ----------
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
     async def accept(self, inter: discord.Interaction, _):
         if not await self._authorised(inter.user):
@@ -917,8 +914,7 @@ class StaffApplicationActionView(discord.ui.View):
         if not role_obj:
             return await inter.response.send_message("Role missing.", ephemeral=True)
 
-        try:
-            await applicant.add_roles(role_obj, reason="Staff application accepted")
+        try:    await applicant.add_roles(role_obj, reason="Staff application accepted")
         except discord.Forbidden:
             return await inter.response.send_message("Cannot add role.", ephemeral=True)
 
@@ -927,7 +923,6 @@ class StaffApplicationActionView(discord.ui.View):
         await self._finish(inter, discord.Color.green())
         await self._notify(f"🎉 You have been **accepted** as **{self.role}**!")
 
-    # ---------- deny ----------
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔")
     async def deny(self, inter: discord.Interaction, _):
         if not await self._authorised(inter.user):
@@ -950,19 +945,17 @@ async def staffapply(inter: discord.Interaction):
 # ───────────── restore persistent views on reboot ─────────────
 async def resume_staff_applications():
     guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        return
+    if not guild: return
     channel = guild.get_channel(STAFF_APPLICATION_CH_ID)
-    if not channel:
-        return
+    if not channel: return
 
-    for row in await db.get_pending_staff_apps():  # [{'user_id', 'role', 'message_id'}]
-        try:
-            await channel.fetch_message(row["message_id"])
-        except discord.NotFound:
-            continue
-        view = StaffApplicationActionView(guild, row["user_id"], row["role"])
-        bot.add_view(view, message_id=row["message_id"])
+    for row in await db.get_pending_staff_apps():      # [{'user_id', 'role', 'message_id'}]
+        try:    await channel.fetch_message(row["message_id"])
+        except discord.NotFound: continue
+        bot.add_view(
+            StaffApplicationActionView(guild, row["user_id"], row["role"]),
+            message_id=row["message_id"]
+        )
         print(f"[resume_staff_apps] Restored view for {row['message_id']}")
 
 # ───────────────────────────── /inactive ─────────────────────────────
