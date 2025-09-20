@@ -837,18 +837,24 @@ class StaffApplicationModal(discord.ui.Modal):
         super().__init__(title=f"{role} Application")
         self.role, self.idx, self.collected = role, idx, collected
 
-        qset = STAFF_QUESTION_SETS[role][idx: idx + 5]
+        qset = STAFF_QUESTION_SETS[role][idx : idx + 5]
         for q, style, req in qset:
             assert len(q) <= 45, f"Modal label >45 chars: {q}"
-            self.add_item(discord.ui.TextInput(label=q, style=style, required=req))
+            self.add_item(
+                discord.ui.TextInput(
+                    label=q,
+                    style=style,
+                    required=req,
+                    max_length=100 if style is discord.TextStyle.short else 4000
+                )
+            )
 
     async def on_submit(self, inter: discord.Interaction):
         # cache answers from this page
-        for comp in self.children:                                  # type: ignore
-            label_text = getattr(comp, "label", None)
-            if label_text is None:                                  # future discord.py
-                label_text = comp._underlying.label                 # fallback
-            self.collected.append((label_text, comp.value))         # type: ignore
+        for comp in self.children:                                    # type: ignore
+            label_txt = getattr(comp, "label", None) or comp._underlying.label
+            self.collected.append((label_txt, comp.value))            # type: ignore
+
         next_idx = self.idx + 5
         if next_idx < len(STAFF_QUESTION_SETS[self.role]):
             await inter.response.send_message(
