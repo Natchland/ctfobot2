@@ -337,10 +337,10 @@ class StatsCog(commands.Cog):
 
     async def _rust_stats(self, sid: str):
         """
-        Return (success: bool, stats: dict[str,int])
+        Return (ok: bool, stats: dict[str,int])
 
-        Uses ONLY the current Rust-schema keys – no fall-back aliases.
-        If a key is missing, the corresponding number is 0.
+        Uses the up-to-date Rust schema keys (dot-notation) and converts
+        them to the simple internal names the embed expects.
         """
         async with aiohttp.ClientSession() as ses:
             url = (
@@ -356,77 +356,81 @@ class StatsCog(commands.Cog):
 
         raw = {s["name"]: s["value"] for s in raw_list}
 
-        # bullets (total) ------------------------------------------------
+        # ---------- helpers -------------------------------------------------
+        def sum_keys(prefix: str) -> int:
+            """Sum every stat that starts with *prefix* (arrow_hit_…, bullet_hit_…)"""
+            return sum(v for k, v in raw.items() if k.startswith(prefix))
+
+        # ---------- projectiles / PvP ---------------------------------------
         bullets_fired = raw.get("bullet_fired", 0) + raw.get("shotgun_fired", 0)
         bullets_hit   = (
-              raw.get("bullet_hit_player",   0)
-            + raw.get("bullet_hit_entity",   0)
-            + raw.get("bullet_hit_building", 0)
-            + raw.get("shotgun_hit_player",  0)
-            + raw.get("shotgun_hit_entity",  0)
-            + raw.get("shotgun_hit_building",0)
+              sum_keys("bullet_hit_")
+            + sum_keys("shotgun_hit_")
         )
 
-        # arrows ---------------------------------------------------------
         arrows_fired = raw.get("arrow_fired", 0)
-        arrows_hit   = (
-              raw.get("arrow_hit_player",  0)
-            + raw.get("arrow_hit_entity",  0)
-            + raw.get("arrow_hit_building",0)
+        arrows_hit   = sum_keys("arrow_hit_")
+
+        headshots = raw.get("headshots", raw.get("headshot", 0))
+
+        kills_player  = raw.get("kill_player", 0)
+        deaths_player = raw.get("death_player", raw.get("deaths", 0))
+
+        # ---------- animal / NPC kills --------------------------------------
+        kill_scientist = raw.get("kill_scientist", 0)
+        kill_bear      = raw.get("kill_bear", 0)
+        kill_wolf      = raw.get("kill_wolf", 0)
+        kill_boar      = raw.get("kill_boar", 0)
+        kill_deer      = raw.get("kill_stag", 0)     # deer = stag in schema
+        kill_horse     = raw.get("kill_horse", 0)
+
+        # ---------- death reasons -------------------------------------------
+        death_suicide = raw.get("death_suicide", 0)
+        death_fall    = raw.get("death_fall",    0)
+
+        # ---------- resources (schema keys use dots) ------------------------
+        harvest_wood   = raw.get("harvest.wood",   raw.get("harvested_wood",   0))
+        harvest_stone  = raw.get("harvest.stones", raw.get("harvested_stones", 0))
+
+        harvest_metal_ore = (
+            raw.get("harvest.metal_ore", 0) + raw.get("acquired_metal.ore", 0)
+        )
+        harvest_hq_metal_ore = (
+            raw.get("harvest.hq_metal_ore", 0) + raw.get("acquired_highqualitymetal.ore", 0)
+        )
+        harvest_sulfur_ore = (
+            raw.get("harvest.sulfur_ore", 0) + raw.get("acquired_sulfur.ore", 0)
         )
 
-        # head-shots -----------------------------------------------------
-        headshots = raw.get("headshot", 0)
-
-        # kills & deaths -------------------------------------------------
-        kill_player  = raw.get("kill_player", 0)
-        death_player = raw.get("death_player", raw.get("deaths", 0))
-
-        kill_scientist = raw.get("kill_scientist", 0)
-        kill_bear      = raw.get("kill_bear",      0)
-        kill_wolf      = raw.get("kill_wolf",      0)
-        kill_boar      = raw.get("kill_boar",      0)
-        kill_deer      = raw.get("kill_deer",      0)   # “stag” no longer used
-        kill_horse     = raw.get("kill_horse",     0)   # appears only if you actually kill one
-
-        death_suicide  = raw.get("death_suicide", 0)
-        death_fall     = raw.get("death_fall",    0)
-
-        # resources ------------------------------------------------------
-        harvest_wood   = raw.get("harvested_wood",        0)
-        harvest_stone  = raw.get("harvested_stones",      0)
-        harvest_metal  = raw.get("acquired_metal.ore",    0)
-        harvest_hqm    = raw.get("harvest_hq_metal_ore",  0)
-        harvest_sulfur = raw.get("harvest_sulfur_ore",    0)
-
+        # ---------- package into the names the embed already expects --------
         stats = {
             # PvP
-            "shots_fired":   bullets_fired,
-            "shots_hit":     bullets_hit,
-            "headshot_hits": headshots,
-            "arrow_fired":   arrows_fired,
-            "arrow_hit":     arrows_hit,
-            "kill_player":   kill_player,
-            "death_player":  death_player,
+            "shots_fired":      bullets_fired,
+            "shots_hit":        bullets_hit,
+            "headshot_hits":    headshots,
+            "arrow_fired":      arrows_fired,
+            "arrow_hit":        arrows_hit,
+            "kill_player":      kills_player,
+            "death_player":     deaths_player,
 
-            # deaths
-            "death_suicide": death_suicide,
-            "death_fall":    death_fall,
+            # other deaths
+            "death_suicide":    death_suicide,
+            "death_fall":       death_fall,
 
             # kills
-            "kill_scientist": kill_scientist,
-            "kill_bear":      kill_bear,
-            "kill_wolf":      kill_wolf,
-            "kill_boar":      kill_boar,
-            "kill_deer":      kill_deer,
-            "kill_horse":     kill_horse,
+            "kill_scientist":   kill_scientist,
+            "kill_bear":        kill_bear,
+            "kill_wolf":        kill_wolf,
+            "kill_boar":        kill_boar,
+            "kill_deer":        kill_deer,
+            "kill_horse":       kill_horse,
 
             # resources
             "harvest_wood":         harvest_wood,
             "harvest_stones":       harvest_stone,
-            "harvest_metal_ore":    harvest_metal,
-            "harvest_hq_metal_ore": harvest_hqm,
-            "harvest_sulfur_ore":   harvest_sulfur,
+            "harvest_metal_ore":    harvest_metal_ore,
+            "harvest_hq_metal_ore": harvest_hq_metal_ore,
+            "harvest_sulfur_ore":   harvest_sulfur_ore,
         }
 
         return True, stats
