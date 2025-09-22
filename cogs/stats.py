@@ -336,6 +336,13 @@ class StatsCog(commands.Cog):
         return unlocked, total, pct
 
     async def _rust_stats(self, sid: str):
+        """
+        Return (success: bool, stats: dict[str,int])
+
+        We aggregate weapon-specific counters into totals so that
+        bullets/arrows/hits/headshots are never 0 when the player actually
+        has activity.
+        """
         async with aiohttp.ClientSession() as ses:
             url = (
                 "https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/"
@@ -343,34 +350,54 @@ class StatsCog(commands.Cog):
             )
             async with ses.get(url) as r:
                 data = await r.json()
-        if not data.get("playerstats", {}).get("stats"):
+
+        raw = data.get("playerstats", {}).get("stats")
+        if not raw:
             return False, {}
-        raw = {s["name"]: s["value"] for s in data["playerstats"]["stats"]}
-        aliases = {
-            "kill_player":   ["kill_player", "player_kills"],
-            "death_player":  ["death_player", "player_deaths"],
-            "shots_fired":   ["shots_fired", "bullet_fired"],
-            "shots_hit":     ["shots_hit",   "bullet_hit"],
-            "headshot_hits":["headshot_hits", "headshot"],
-            "arrow_fired":  ["arrow_fired"],
-            "arrow_hit":    ["arrow_hit"],
-            "kill_scientist":["kill_scientist"],
-            "kill_bear":    ["kill_bear"],
-            "kill_wolf":    ["kill_wolf"],
-            "kill_boar":    ["kill_boar"],
-            "kill_deer":    ["kill_deer"],
-            "kill_horse":   ["kill_horse"],
-            "death_suicide":["death_suicide"],
-            "death_fall":   ["death_fall"],
-            "harvest_wood": ["harvest_wood"],
-            "harvest_stones":["harvest_stones"],
-            "harvest_metal_ore":      ["harvest_metal_ore"],
-            "harvest_hq_metal_ore":   ["harvest_hq_metal_ore"],
-            "harvest_sulfur_ore":     ["harvest_sulfur_ore"],
+
+        raw_map = {s["name"]: s["value"] for s in raw}
+
+        # helper to sum keys that start with / end with pattern
+        def sum_keys(prefix: str = "", suffix: str = "") -> int:
+            return sum(v for k, v in raw_map.items()
+                       if k.startswith(prefix) and k.endswith(suffix))
+
+        # aggregated totals
+        stats = {
+            # bullets / head-shots (all guns)
+            "shots_fired":      sum_keys(suffix="_fired"),
+            "shots_hit":        sum_keys(suffix="_hit"),
+            "headshot_hits":    sum_keys(prefix="headshot_"),
+
+            # arrows
+            "arrow_fired":      sum_keys(suffix="_arrow_fired") + raw_map.get("arrow_fired", 0),
+            "arrow_hit":        sum_keys(suffix="_arrow_hit")   + raw_map.get("arrow_hit", 0),
+
+            # core PvP
+            "kill_player":      raw_map.get("kill_player",   0) + raw_map.get("player_kills",   0),
+            "death_player":     raw_map.get("death_player",  0) + raw_map.get("player_deaths",  0),
+
+            # other deaths
+            "death_suicide":    raw_map.get("death_suicide", 0),
+            "death_fall":       raw_map.get("death_fall",    0),
+
+            # NPC / animal kills (these keys usually exist already)
+            "kill_scientist":   raw_map.get("kill_scientist", 0),
+            "kill_bear":        raw_map.get("kill_bear",      0),
+            "kill_wolf":        raw_map.get("kill_wolf",      0),
+            "kill_boar":        raw_map.get("kill_boar",      0),
+            "kill_deer":        raw_map.get("kill_deer",      0),
+            "kill_horse":       raw_map.get("kill_horse",     0),
+
+            # resources
+            "harvest_wood":          raw_map.get("harvest_wood",           0),
+            "harvest_stones":        raw_map.get("harvest_stones",         0),
+            "harvest_metal_ore":     raw_map.get("harvest_metal_ore",      0),
+            "harvest_hq_metal_ore":  raw_map.get("harvest_hq_metal_ore",   0),
+            "harvest_sulfur_ore":    raw_map.get("harvest_sulfur_ore",     0),
         }
-        fixed = {canon: next((raw[k] for k in keys if k in raw), 0)
-                 for canon, keys in aliases.items()}
-        return True, fixed
+
+        return True, stats
 
 
 # ═════════════════════ setup entry point ═════════════════════
