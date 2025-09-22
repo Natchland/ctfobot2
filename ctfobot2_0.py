@@ -1638,6 +1638,7 @@ async def memberform(inter: discord.Interaction):
 async def on_ready():
     await db.connect()
     await (import_module("cogs.giveaways").setup)(bot, db)
+    await (import_module("cogs.gamestats").setup)(bot, db)
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
     guild_obj = discord.Object(id=GUILD_ID)
