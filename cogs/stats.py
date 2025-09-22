@@ -22,7 +22,6 @@ BM_HEADERS     = {"Authorization": f"Bearer {BM_TOKEN}"} if BM_TOKEN else {}
 APPID_RUST = 252490
 PROFILE_RE = re.compile(r"https?://steamcommunity\.com/(?:profiles|id)/([^/]+)")
 
-
 # ═══════════════════════════════════════════════════════════════
 class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -335,12 +334,15 @@ class StatsCog(commands.Cog):
         pct       = f"{unlocked / total * 100:.1f}%"
         return unlocked, total, pct
 
+    # ──────────────────────────────────────────────────────
+    # UPDATED helper – includes all known resource key variants
+    # ──────────────────────────────────────────────────────
     async def _rust_stats(self, sid: str):
         """
         Return (ok: bool, stats: dict[str,int])
 
-        Uses the up-to-date Rust schema keys (dot-notation) and converts
-        them to the simple internal names the embed expects.
+        – Reads both dot-notation and legacy underscore keys
+        – Merges 'harvest.*' and 'acquired_*' variants for each ore
         """
         async with aiohttp.ClientSession() as ses:
             url = (
@@ -356,53 +358,55 @@ class StatsCog(commands.Cog):
 
         raw = {s["name"]: s["value"] for s in raw_list}
 
-        # ---------- helpers -------------------------------------------------
+        # helper to sum grouped keys
         def sum_keys(prefix: str) -> int:
-            """Sum every stat that starts with *prefix* (arrow_hit_…, bullet_hit_…)"""
             return sum(v for k, v in raw.items() if k.startswith(prefix))
 
-        # ---------- projectiles / PvP ---------------------------------------
+        # ---- combat
         bullets_fired = raw.get("bullet_fired", 0) + raw.get("shotgun_fired", 0)
-        bullets_hit   = (
-              sum_keys("bullet_hit_")
-            + sum_keys("shotgun_hit_")
-        )
-
-        arrows_fired = raw.get("arrow_fired", 0)
-        arrows_hit   = sum_keys("arrow_hit_")
-
-        headshots = raw.get("headshots", raw.get("headshot", 0))
+        bullets_hit   = sum_keys("bullet_hit_") + sum_keys("shotgun_hit_")
+        arrows_fired  = raw.get("arrow_fired", 0)
+        arrows_hit    = sum_keys("arrow_hit_")
+        headshots     = raw.get("headshots", raw.get("headshot", 0))
 
         kills_player  = raw.get("kill_player", 0)
         deaths_player = raw.get("death_player", raw.get("deaths", 0))
 
-        # ---------- animal / NPC kills --------------------------------------
+        # ---- animal / NPC kills
         kill_scientist = raw.get("kill_scientist", 0)
         kill_bear      = raw.get("kill_bear", 0)
         kill_wolf      = raw.get("kill_wolf", 0)
         kill_boar      = raw.get("kill_boar", 0)
-        kill_deer      = raw.get("kill_stag", 0)     # deer = stag in schema
+        kill_deer      = raw.get("kill_stag", 0)     # schema uses stag
         kill_horse     = raw.get("kill_horse", 0)
 
-        # ---------- death reasons -------------------------------------------
-        death_suicide = raw.get("death_suicide", 0)
-        death_fall    = raw.get("death_fall",    0)
+        # ---- other deaths
+        death_suicide  = raw.get("death_suicide", 0)
+        death_fall     = raw.get("death_fall",    0)
 
-        # ---------- resources (schema keys use dots) ------------------------
-        harvest_wood   = raw.get("harvest.wood",   raw.get("harvested_wood",   0))
-        harvest_stone  = raw.get("harvest.stones", raw.get("harvested_stones", 0))
+        # ---- resources
+        harvest_wood  = raw.get("harvest.wood",   raw.get("harvested_wood",   0))
+        harvest_stone = raw.get("harvest.stones", raw.get("harvested_stones", 0))
 
         harvest_metal_ore = (
-            raw.get("harvest.metal_ore", 0) + raw.get("acquired_metal.ore", 0)
-        )
-        harvest_hq_metal_ore = (
-            raw.get("harvest.hq_metal_ore", 0) + raw.get("acquired_highqualitymetal.ore", 0)
-        )
-        harvest_sulfur_ore = (
-            raw.get("harvest.sulfur_ore", 0) + raw.get("acquired_sulfur.ore", 0)
+              raw.get("harvest.metal_ore", 0)
+            + raw.get("harvest_metal_ore", 0)          # legacy underscore
+            + raw.get("acquired_metal.ore", 0)
         )
 
-        # ---------- package into the names the embed already expects --------
+        harvest_hq_metal_ore = (
+              raw.get("harvest.hq_metal_ore", 0)
+            + raw.get("harvest_hq_metal_ore", 0)       # legacy underscore
+            + raw.get("acquired_highqualitymetal.ore", 0)
+            + raw.get("acquired_hq_metal_ore", 0)      # very old servers
+        )
+
+        harvest_sulfur_ore = (
+              raw.get("harvest.sulfur_ore", 0)
+            + raw.get("harvest_sulfur_ore", 0)         # legacy underscore
+            + raw.get("acquired_sulfur.ore", 0)
+        )
+
         stats = {
             # PvP
             "shots_fired":      bullets_fired,
@@ -412,11 +416,9 @@ class StatsCog(commands.Cog):
             "arrow_hit":        arrows_hit,
             "kill_player":      kills_player,
             "death_player":     deaths_player,
-
-            # other deaths
+            # deaths
             "death_suicide":    death_suicide,
             "death_fall":       death_fall,
-
             # kills
             "kill_scientist":   kill_scientist,
             "kill_bear":        kill_bear,
@@ -424,7 +426,6 @@ class StatsCog(commands.Cog):
             "kill_boar":        kill_boar,
             "kill_deer":        kill_deer,
             "kill_horse":       kill_horse,
-
             # resources
             "harvest_wood":         harvest_wood,
             "harvest_stones":       harvest_stone,
@@ -432,7 +433,6 @@ class StatsCog(commands.Cog):
             "harvest_hq_metal_ore": harvest_hq_metal_ore,
             "harvest_sulfur_ore":   harvest_sulfur_ore,
         }
-
         return True, stats
 
 
