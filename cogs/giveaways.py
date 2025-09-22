@@ -27,8 +27,8 @@ STAFF_BONUS_ROLE_IDS = {
 }
 
 STREAK_BONUS_PER_SET = 3       # +3 per full 3-day streak
-STAFF_BONUS_PER_WEEK = 3       # +3 per week with staff role
-BOOST_BONUS_PER_WEEK = 3       # +3 per week of Nitro boost
+STAFF_BONUS_PER_WEEK = 1       # +1 per week with staff role
+BOOST_BONUS_PER_WEEK = 2       # +2 per week of Nitro boost
 
 
 # ───────────────────────────  HELPERS  ───────────────────────────────
