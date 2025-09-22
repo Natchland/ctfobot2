@@ -78,14 +78,15 @@ class Giveaway:
                            activity: dict[int, dict]) -> int:
         if ACTIVE_ROLE_ID not in [r.id for r in m.roles]:
             return 0
+        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
         t = 1
         if rec := activity.get(m.id):
             t += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
         if m.premium_since:
-            eff = max(m.premium_since, self.started_at)
-            t += ((dt.datetime.utcnow() - eff).days // 7) * BOOST_BONUS_PER_WEEK
+            effective = max(m.premium_since, self.started_at)
+            t += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
         if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
-            t += ((dt.datetime.utcnow() - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
+            t += ((now - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
         return t
 
     async def recompute(self, guild: discord.Guild, pool: asyncpg.Pool):
