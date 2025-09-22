@@ -49,7 +49,7 @@ class StatsCog(commands.Cog):
 
         e = discord.Embed(
             title=f"Player check – {prof.get('personaname','Unknown')}",
-            url=prof.get("profileurl") or discord.Embed.Empty,
+            url=prof.get("profileurl") or None,
             colour=colour,
         ).set_footer(text=f"SteamID64: {sid}")
 
@@ -122,7 +122,7 @@ class StatsCog(commands.Cog):
         e = discord.Embed(
             title=f"Rust stats – [{prof.get('personaname','Unknown')}]({prof.get('profileurl')})",
             colour=0xFF7A00
-        ).set_thumbnail(url=prof.get("avatarfull", discord.Embed.Empty)
+        ).set_thumbnail(url=prof.get("avatarfull", None)
         ).set_footer(text=f"SteamID64: {sid}")
 
         # ───────── Overview ─────────
