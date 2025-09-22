@@ -31,11 +31,15 @@ RISK_FLAG_EXPLANATIONS = {
 }
 
 class StatsCog(commands.Cog):
+
+    check = app_commands.Group(name="check",  description="Look-ups & checks")
+    stats = app_commands.Group(name="stats",  description="Game statistics")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    check = app_commands.Group(name="check", description="Look-ups & checks")
-    stats = app_commands.Group(name="stats", description="Game statistics")
+        bot.tree.add_command(self.check)
+        bot.tree.add_command(self.stats)
 
     @check.command(name="help", description="Explain risk flags")
     async def check_help(self, inter: discord.Interaction):
