@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────
-#  ctfobot2.0.py   –  CTFO Discord bot + giveaway / registration system
+#  ctfobot2.0.py   –  CTFO Discord bot / registration system
 # ──────────────────────────────────────────────────────────────────────
 import os, sys, asyncio, signal, json
 from datetime import datetime, timedelta, timezone, date
@@ -9,6 +9,7 @@ from typing import Dict, Any
 import discord, asyncpg
 from discord import app_commands
 from discord.ext import commands, tasks
+from importlib import import_module
 
 # ══════════════════════════════════════════════════════════════════════
 #                             CONFIGURATION
@@ -77,12 +78,10 @@ STREAK_BONUS_PER_SET  = 3      # every 3-day set gives +3
 # ══════════════════════════════════════════════════════════════════════
 class CTFBot(commands.Bot):
     last_anonymous_time: dict[int, datetime]
-    giveaway_stop_events: dict[int, asyncio.Event]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.last_anonymous_time = {}
-        self.giveaway_stop_events = {}
 
 # ── instantiate your custom bot ──
 intents = discord.Intents.default()
@@ -144,6 +143,8 @@ class Database:
     -- in case the column is missing on an old table:
     ALTER TABLE giveaways
         ADD COLUMN IF NOT EXISTS start_ts BIGINT;
+    
+    ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS note TEXT;
 
     CREATE TABLE IF NOT EXISTS member_forms (
         id         SERIAL PRIMARY KEY,
@@ -273,32 +274,6 @@ class Database:
             rows = await conn.fetch(
                 "SELECT * FROM inactive_members WHERE until_ts <= $1",
                 now_ts
-            )
-            return [dict(r) for r in rows]
-
-    # ────────────────────────────────────────────────────────────────
-    #  GIVEAWAYS
-    # ────────────────────────────────────────────────────────────────
-    async def add_giveaway(self, ch_id, msg_id, prize, start_ts, end_ts):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO giveaways "
-                "(channel_id, message_id, prize, start_ts, end_ts, active) "
-                "VALUES ($1,$2,$3,$4,$5,TRUE)",
-                ch_id, msg_id, prize, start_ts, end_ts
-            )
-
-    async def end_giveaway(self, msg_id):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE giveaways SET active=FALSE WHERE message_id=$1",
-                msg_id
-            )
-
-    async def get_active_giveaways(self):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM giveaways WHERE active=TRUE"
             )
             return [dict(r) for r in rows]
 
@@ -1652,370 +1627,6 @@ async def memberform(inter: discord.Interaction):
         ephemeral=True
     )
 
-# ═══════════════════════════════ GIVEAWAYS ════════════════════════════
-def fmt_time(seconds: int) -> str:
-    """
-    Turn a number of seconds into a compact human-readable string.
-    Examples: 2d 4h, 3h 17m, 7m 12s, 4s
-    """
-    if seconds < 0:
-        seconds = 0
-
-    days, seconds = divmod(seconds, 86_400)
-    hours, seconds = divmod(seconds, 3_600)
-    mins, seconds = divmod(seconds, 60)
-
-    parts: list[str] = []
-    if days:
-        parts.append(f"{days}d")
-    if days or hours:
-        parts.append(f"{hours}h")
-    if days or hours or mins:
-        parts.append(f"{mins}m")
-    parts.append(f"{seconds}s")
-    return " ".join(parts)
-
-
-def put_field(e: discord.Embed, idx: int, *, name: str, value: str, inline=False):
-    """Insert / replace an embed field at a given index."""
-    if idx < len(e.fields):
-        e.set_field_at(idx, name=name, value=value, inline=inline)
-    else:
-        while len(e.fields) < idx:
-            e.add_field(name="\u200b", value="\u200b", inline=False)
-        e.add_field(name=name, value=value, inline=inline)
-
-
-def eligible(guild: discord.Guild):
-    role = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
-    return [m for m in role.members if not m.bot] if role else []
-
-async def tickets_for_entrants(
-    guild: discord.Guild,
-    start_dt: datetime               # giveaway start
-) -> dict[discord.Member, int]:
-    """
-    Calculate ticket totals from `start_dt` forward.
-    """
-    await ensure_member_cache(guild)
-    members = eligible(guild)
-    if not members:
-        return {}
-
-    activity_rows = await db.get_all_activity()
-    now           = datetime.now(timezone.utc)
-    tickets: dict[discord.Member, int] = {}
-
-    for m in members:
-        total = 1                                           # base ticket
-
-        # ---- activity streak bonus ----
-        rec = activity_rows.get(m.id)
-        if rec:
-            total += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
-
-        # ---- booster bonus ----
-        if m.premium_since:
-            effective = max(m.premium_since, start_dt)
-            total += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
-
-        # ---- staff role bonus ----
-        if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
-            total += ((now - start_dt).days // 7) * STAFF_BONUS_PER_WEEK
-
-        tickets[m] = total
-    return tickets
-
-# ═════════════════════ GIVEAWAY REFRESHER (panel-driven) ═════════════
-async def refresh_giveaway_from_row(row: dict):
-    """
-    Patch the embed whenever the web panel updates a giveaway row.
-    """
-    guild = bot.get_guild(GUILD_ID)
-    chan  = guild.get_channel(row["channel_id"]) if guild else None
-    if not guild or not chan:
-        return
-    try:
-        msg = await chan.fetch_message(row["message_id"])
-    except discord.NotFound:
-        return
-
-    embed = msg.embeds[0]
-    # Update prize field (index 0 in our embed)
-    put_field(embed, 0, name="Prize", value=f"**{row['prize']}**", inline=False)
-
-    now = int(datetime.now(timezone.utc).timestamp())
-    remaining = row["end_ts"] - now
-
-    if not row["active"]:
-        put_field(embed, 1, name="Time left", value="**ENDED**", inline=False)
-        embed.colour = discord.Color.dark_gray()
-        await msg.edit(embed=embed, view=None)
-        ev = bot.giveaway_stop_events.get(row["message_id"])
-        if ev and not ev.is_set():
-            ev.set()
-        return
-
-    # Still running
-    put_field(embed, 1, name="Time left", value=f"**{fmt_time(remaining)}**", inline=False)
-
-
-async def listen_for_giveaway_changes():
-    """
-    LISTEN on Postgres channel 'giveaways_changed' so the bot reacts
-    to edits coming from the FastAPI admin panel.
-    """
-    conn = await asyncpg.connect(DATABASE_URL)
-
-    async def _listener(_c, _pid, _chan, payload):
-        gid = int(payload)
-        row = await db.pool.fetchrow("SELECT * FROM giveaways WHERE id=$1", gid)
-        if row:
-            await refresh_giveaway_from_row(dict(row))
-
-    await conn.add_listener("giveaways_changed", _listener)
-    print("[giveaways_changed] listener attached")
-
-    try:
-        while not bot.is_closed():
-            await asyncio.sleep(3600)
-    finally:
-        await conn.close()
-
-
-class GiveawayControl(discord.ui.View):
-    def __init__(self, guild, ch_id, msg_id, prize, stop_event: asyncio.Event):
-        super().__init__(timeout=None)
-        self.guild, self.ch_id, self.msg_id, self.prize, self.stop = (
-            guild, ch_id, msg_id, prize, stop_event
-        )
-
-    # ---------- helpers ----------
-    def _admin(self, member: discord.Member) -> bool:
-        return member.guild_permissions.administrator or member.id == bot.owner_id
-
-    async def _finish(self, ended_text: str, colour: discord.Colour):
-        chan = self.guild.get_channel(self.ch_id)
-        msg  = await chan.fetch_message(self.msg_id)
-
-        embed = msg.embeds[0]
-        put_field(embed, 1, name="Time left", value=f"**{ended_text}**")
-        put_field(embed, 3, name="Eligible Entrants",
-                  value=f"Giveaway {ended_text.lower()}.")
-        embed.color = colour
-        await msg.edit(embed=embed, view=None)
-        self.stop.set()
-        await db.end_giveaway(self.msg_id)
-
-    # ---------- buttons ----------
-    @discord.ui.button(label="End & Draw", style=discord.ButtonStyle.success,
-                       emoji="🎰", custom_id="gw_end")
-    async def end(self, inter: discord.Interaction, _):
-        if not self._admin(inter.user):
-            return await inter.response.send_message("Not authorised.", ephemeral=True)
-
-        # fetch start_ts (with same back-fill safety)
-        start_ts = await db.pool.fetchval(
-            "SELECT start_ts FROM giveaways WHERE message_id=$1", self.msg_id
-        )
-        if not start_ts:
-            msg = await self.guild.get_channel(self.ch_id).fetch_message(self.msg_id)
-            start_ts = int(msg.created_at.replace(tzinfo=timezone.utc).timestamp())
-            await db.pool.execute(
-                "UPDATE giveaways SET start_ts=$1 WHERE message_id=$2",
-                start_ts, self.msg_id
-            )
-        start_dt = datetime.fromtimestamp(start_ts, timezone.utc)
-
-        tickets = await tickets_for_entrants(self.guild, start_dt)
-        chan    = self.guild.get_channel(self.ch_id)
-
-        if not tickets:
-            await chan.send("No eligible entrants.")
-            await self._finish("ENDED", discord.Color.dark_gray())
-            return await inter.response.send_message("Ended.", ephemeral=True)
-
-        import random
-        population, weights = zip(*tickets.items())
-        winner = random.choices(population, weights, k=1)[0]
-
-        await chan.send(
-            embed=discord.Embed(
-                title=f"🎉 {self.prize} – WINNER 🎉",
-                description=f"Congrats {winner.mention}! Enjoy **{self.prize}**!",
-                colour=discord.Color.gold(),
-            )
-        )
-        await self._finish("ENDED", discord.Color.dark_gray())
-        await inter.response.send_message("Ended.", ephemeral=True)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger,
-                       emoji="🛑", custom_id="gw_cancel")
-    async def cancel(self, inter: discord.Interaction, _):
-        if not self._admin(inter.user):
-            return await inter.response.send_message("Not authorised.",
-                                                     ephemeral=True)
-        await self._finish("CANCELLED", discord.Color.red())
-        await inter.response.send_message("Cancelled.", ephemeral=True)
-
-
-async def run_giveaway(guild, ch_id, msg_id, prize, end_ts, stop):
-    """
-    Periodically updates the embed; when time expires draws a winner
-    weighted by ticket counts that start at giveaway creation.
-    """
-    channel = guild.get_channel(ch_id)
-    if not channel:
-        return
-    try:
-        message = await channel.fetch_message(msg_id)
-    except discord.NotFound:
-        return
-
-    # ----- fetch / back-fill start_ts --------------------------------
-    row = await db.pool.fetchrow(
-        "SELECT start_ts FROM giveaways WHERE message_id=$1", msg_id
-    )
-    if row and row["start_ts"]:
-        start_dt = datetime.fromtimestamp(row["start_ts"], timezone.utc)
-    else:
-        start_dt = message.created_at.replace(tzinfo=timezone.utc)
-        await db.pool.execute(
-            "UPDATE giveaways SET start_ts=$1 WHERE message_id=$2",
-            int(start_dt.timestamp()), msg_id
-        )
-
-    last_display: str | None = None
-
-    while not stop.is_set():
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        remaining = end_ts - now_ts
-        if remaining <= 0:
-            break
-
-        display = fmt_time(remaining)
-        if display != last_display:
-            last_display = display
-
-            tickets = await tickets_for_entrants(guild, start_dt)
-            entrants_txt = (
-                "\n".join(f"• {m.mention} – **{n}**" for m, n in tickets.items())
-                or "*None yet*"
-            )
-
-            embed = message.embeds[0]
-            put_field(embed, 1, name="Time left", value=f"**{display}**")
-            put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
-
-            try:
-                await message.edit(embed=embed)
-            except discord.HTTPException:
-                pass
-
-        await asyncio.sleep(1 if remaining <= 10 else 10 if remaining <= 300 else 30)
-
-    if stop.is_set():
-        return
-
-    tickets = await tickets_for_entrants(guild, start_dt)
-    if not tickets:
-        await channel.send("No eligible entrants.")
-        await db.end_giveaway(msg_id)
-        return
-
-    import random
-    population, weights = zip(*tickets.items())
-    winner = random.choices(population, weights, k=1)[0]
-
-    await channel.send(
-        embed=discord.Embed(
-            title=f"🎉 {prize} – WINNER 🎉",
-            description=f"Congratulations {winner.mention}! You won **{prize}**!",
-            colour=discord.Color.gold(),
-        )
-    )
-    await db.end_giveaway(msg_id)
-
-
-async def resume_giveaways():
-    """
-    Called in on_ready(): restores any active giveaways saved in the database.
-    """
-    guild = bot.get_guild(GUILD_ID)
-    channel = guild.get_channel(GIVEAWAY_CH_ID) if guild else None
-    if not guild or not channel:
-        return
-
-    for row in await db.get_active_giveaways():
-        stop = asyncio.Event()
-        bot.giveaway_stop_events[row['message_id']] = stop
-        view = GiveawayControl(guild, row['channel_id'],
-                               row['message_id'], row['prize'], stop)
-        bot.add_view(view, message_id=row['message_id'])
-        asyncio.create_task(
-            run_giveaway(guild, row['channel_id'], row['message_id'],
-                         row['prize'], row['end_ts'], stop)
-        )
-
-
-# ────────────────────────── /giveaway command ─────────────────────────
-@bot.tree.command(name="giveaway", description="Start a giveaway")
-@app_commands.check(lambda i: i.user.guild_permissions.administrator)
-@app_commands.choices(
-    duration=[
-        app_commands.Choice(name="7 days",  value=7),
-        app_commands.Choice(name="14 days", value=14),
-        app_commands.Choice(name="30 days", value=30),
-    ]
-)
-@app_commands.describe(prize="Prize to give away")
-async def giveaway(inter: discord.Interaction,
-                   duration: app_commands.Choice[int],
-                   prize: str):
-
-    await inter.response.defer(ephemeral=True)
-
-    guild   = inter.guild
-    channel = guild.get_channel(GIVEAWAY_CH_ID)
-    role    = guild.get_role(GIVEAWAY_ROLE_ID)
-    if not channel or not role:
-        return await inter.followup.send(
-            "Giveaway channel or role missing.", ephemeral=True
-        )
-
-    end_ts = int(datetime.now(timezone.utc).timestamp()) + duration.value * 86_400
-    stop   = asyncio.Event()
-
-    embed = (discord.Embed(title="🎉 GIVEAWAY 🎉", colour=discord.Color.blurple())
-             .add_field(name="Prize",      value=f"**{prize}**",        inline=False)
-             .add_field(name="Time left",  value=f"**{duration.name}**",inline=False)
-             .add_field(name="Eligibility",
-                        value=f"Only {role.mention} can win.",           inline=False)
-             .add_field(name="Eligible Entrants", value="*Updating…*",   inline=False))
-
-    view    = GiveawayControl(guild, channel.id, 0, prize, stop)
-    message = await channel.send(embed=embed, view=view)
-    view.msg_id = view.message_id = message.id
-    bot.add_view(view, message_id=message.id)
-
-    # write DB record
-    start_ts = int(message.created_at.replace(tzinfo=timezone.utc).timestamp())
-    await db.add_giveaway(channel.id, message.id, prize, start_ts, end_ts)
-
-    # immediately fill entrant list
-    await ensure_member_cache(guild)
-    entrants_now = await tickets_for_entrants(guild, message.created_at.replace(tzinfo=timezone.utc))
-    entrants_txt = "\n".join(f"• {m.mention} – **{n}**" for m, n in entrants_now.items()) or "*None yet*"
-    put_field(embed, 3, name="Eligible Entrants", value=entrants_txt)
-    await message.edit(embed=embed)
-
-    asyncio.create_task(
-        run_giveaway(guild, channel.id, message.id, prize, end_ts, stop)
-    )
-
-    await inter.followup.send(f"Giveaway started in {channel.mention}.", ephemeral=True)
-# ──────────────────────────────────────────────────────────────────────
-
 # ════════════════════════ on_ready & startup ══════════════════════════
 @bot.event
 async def on_ready():
@@ -2028,12 +1639,12 @@ async def on_ready():
     print("Slash-commands synced")
 
     await update_codes_message(bot, await db.get_codes())
-    await resume_giveaways()
+
     await resume_member_forms()
     await resume_staff_applications()
+    await (import_module("cogs.giveaways").setup)(bot, db)
 
     bot.loop.create_task(listen_for_code_changes())
-    bot.loop.create_task(listen_for_giveaway_changes())
 
     if not activity_maintenance.is_running():
         activity_maintenance.start()
