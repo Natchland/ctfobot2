@@ -1,4 +1,4 @@
-# cogs/giveaways.py  –  standalone, production-ready
+# cogs/giveaways.py  –  production-ready restart-persistent giveaway cog
 from __future__ import annotations
 
 import asyncio
@@ -11,29 +11,28 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-if TYPE_CHECKING:
-    from ctfobot2_0 import Database           # runtime-safe forward import
+if TYPE_CHECKING:            # forward-declare for type checkers only
+    from ctfobot2_0 import Database
 
 
-# ────────────────────────── GUILD / ROLE IDS ──────────────────────────
+# ────────────────────────────────  CONFIG  ────────────────────────────────
 GUILD_ID            = 1377035207777194005
 GIVEAWAY_CHANNEL_ID = 1413929735658016899          # #giveaways
 ACTIVE_ROLE_ID      = 1403337937722019931          # “Active Member”
 
-# extra perms besides normal administrator
 ADMIN_ROLE_IDS       = {1377103244089622719}
 STAFF_BONUS_ROLE_IDS = {
-    1377077466513932338,  # Group-Leader
-    1377084533706588201,  # Player-Management
-    1410659214959054988,  # Recruitment
+    1377077466513932338,
+    1377084533706588201,
+    1410659214959054988,
 }
 
-# ticket constants
-STREAK_BONUS_PER_SET = 3       # +3 for every 3-day activity streak
+STREAK_BONUS_PER_SET = 3
 STAFF_BONUS_PER_WEEK = 3
 BOOST_BONUS_PER_WEEK = 3
 
-# embed / countdown helper
+
+# ──────────────────────────────  HELPERS  ───────────────────────────────
 def _fmt_left(td: dt.timedelta) -> str:
     sec = max(int(td.total_seconds()), 0)
     d, sec = divmod(sec, 86_400)
@@ -47,6 +46,7 @@ def _fmt_left(td: dt.timedelta) -> str:
         return f"{m}m {s}s"
     return f"{s}s"
 
+
 def _is_admin(m: discord.Member) -> bool:
     return (
         m.guild_permissions.administrator
@@ -54,42 +54,36 @@ def _is_admin(m: discord.Member) -> bool:
         or any(r.id in ADMIN_ROLE_IDS for r in m.roles)
     )
 
-# pull activity table once per refresh
+
 async def _activity_map(pool: asyncpg.Pool) -> dict[int, dict]:
+    """Load the entire activity table once each refresh."""
     rows = await pool.fetch("SELECT * FROM activity")
     return {r["user_id"]: dict(r) for r in rows}
 
 
-# ───────────────────────────── Giveaway ──────────────────────────────
+# ───────────────────────────── Giveaway obj ─────────────────────────────
 class Giveaway:
-    instances: Dict[int, "Giveaway"] = {}          # message_id -> instance
+    instances: Dict[int, "Giveaway"] = {}          # message_id ➜ instance
 
     def __init__(self, prize: str, ends_at: dt.datetime):
         self.prize       = prize
         self.ends_at     = ends_at
         self.started_at  = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 
-        self.message: Optional[discord.Message] = None
-        self.entrants: Dict[int, int] = {}
+        self.message:  Optional[discord.Message] = None
+        self.entrants: Dict[int, int]            = {}
 
-    # -------------------- ticket maths --------------------
+    # ---------- ticket calculation ----------
     async def _tickets_for(self, m: discord.Member,
                            activity: dict[int, dict]) -> int:
         if ACTIVE_ROLE_ID not in [r.id for r in m.roles]:
             return 0
-
         t = 1
-        # activity streak
-        rec = activity.get(m.id)
-        if rec:
+        if rec := activity.get(m.id):
             t += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
-
-        # boosters
         if m.premium_since:
-            effective = max(m.premium_since, self.started_at)
-            t += ((dt.datetime.utcnow() - effective).days // 7) * BOOST_BONUS_PER_WEEK
-
-        # staff
+            eff = max(m.premium_since, self.started_at)
+            t += ((dt.datetime.utcnow() - eff).days // 7) * BOOST_BONUS_PER_WEEK
         if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
             t += ((dt.datetime.utcnow() - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
         return t
@@ -104,12 +98,11 @@ class Giveaway:
             if n:
                 self.entrants[m.id] = n
 
-    # -------------------- embed builder -------------------
+    # ---------- embed ----------
     def _embed(self, guild: discord.Guild,
-               *, ended: bool = False,
+               *, ended=False,
                winner: Optional[discord.Member] = None) -> discord.Embed:
-        e = discord.Embed(title="🎉 GIVEAWAY 🎉",
-                          colour=discord.Color.blurple())
+        e = discord.Embed(title="🎉 GIVEAWAY 🎉", colour=discord.Color.blurple())
         e.add_field(name="Prize", value=f"**{self.prize}**", inline=False)
 
         if ended:
@@ -127,7 +120,7 @@ class Giveaway:
                         value=winner.mention if winner else "Cancelled",
                         inline=False)
         else:
-            lines = (
+            listing = (
                 "\n".join(
                     f"• {guild.get_member(uid).mention} – **{t}**"
                     for uid, t in sorted(self.entrants.items(),
@@ -135,15 +128,15 @@ class Giveaway:
                 )
                 or "*None yet*"
             )
-            e.add_field(name="Eligible Entrants", value=lines, inline=False)
+            e.add_field(name="Eligible Entrants", value=listing, inline=False)
         return e
 
-    # -------------------- SQL helpers ---------------------
-    async def _insert_row(self, pool: asyncpg.Pool, channel_id: int):
+    # ---------- DB helpers ----------
+    async def _insert_row(self, pool: asyncpg.Pool, ch_id: int):
         await pool.execute(
             "INSERT INTO giveaways (channel_id, message_id, prize, "
             "start_ts, end_ts, active) VALUES ($1,$2,$3,$4,$5,TRUE)",
-            channel_id, self.message.id, self.prize,
+            ch_id, self.message.id, self.prize,
             int(self.started_at.timestamp()), int(self.ends_at.timestamp())
         )
 
@@ -154,13 +147,13 @@ class Giveaway:
             self.message.id
         )
 
-    # -------------------- actions -------------------------
-    async def start(self, channel: discord.TextChannel, pool: asyncpg.Pool):
-        await self.recompute(channel.guild, pool)
+    # ---------- life-cycle ----------
+    async def start(self, ch: discord.TextChannel, pool: asyncpg.Pool):
+        await self.recompute(ch.guild, pool)
         view = _GwButtons(self, pool)
-        self.message = await channel.send(embed=self._embed(channel.guild), view=view)
+        self.message = await ch.send(embed=self._embed(ch.guild), view=view)
         Giveaway.instances[self.message.id] = self
-        await self._insert_row(pool, channel.id)
+        await self._insert_row(pool, ch.id)
 
     async def cancel(self, guild: discord.Guild, pool: asyncpg.Pool):
         await self._close_row(pool, None)
@@ -176,12 +169,11 @@ class Giveaway:
         return guild.get_member(winner_id)
 
 
-# ─────────────────────────── View (buttons) ──────────────────────────
+# ───────────────────────────── Button View ────────────────────────────
 class _GwButtons(discord.ui.View):
-    def __init__(self, giveaway: Giveaway, pool: asyncpg.Pool):
+    def __init__(self, gw: Giveaway, pool: asyncpg.Pool):
         super().__init__(timeout=None)
-        self.gw   = giveaway
-        self.pool = pool
+        self.gw, self.pool = gw, pool
 
     async def interaction_check(self, inter: discord.Interaction) -> bool:
         if not _is_admin(inter.user):
@@ -190,7 +182,7 @@ class _GwButtons(discord.ui.View):
         return True
 
     @discord.ui.button(label="🎁 End & Draw", style=discord.ButtonStyle.green)
-    async def _b_end(self, inter: discord.Interaction, _: discord.ui.Button):
+    async def _end(self, inter: discord.Interaction, _: discord.ui.Button):
         winner = await self.gw.draw(inter.guild, self.pool)
         await self.gw._close_row(self.pool, winner.id if winner else None)
         await self.gw.message.edit(embed=self.gw._embed(inter.guild, True, winner),
@@ -202,42 +194,44 @@ class _GwButtons(discord.ui.View):
         await inter.response.send_message("Giveaway ended.", ephemeral=True)
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
-    async def _b_cancel(self, inter: discord.Interaction, _: discord.ui.Button):
+    async def _cancel(self, inter: discord.Interaction, _: discord.ui.Button):
         await self.gw.cancel(inter.guild, self.pool)
         await inter.response.send_message("Cancelled.", ephemeral=True)
 
 
-# ─────────────────────────── Cog ────────────────────────────
+# ───────────────────────────── Cog class ───────────────────────────────
 class GiveawayCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: "Database"):
         self.bot  = bot
         self.pool = db.pool
-        # resume unfinished giveaways
         bot.loop.create_task(self._resume())
 
-    # ---------- /giveaway ----------
+    # ---------- slash command ----------
     @app_commands.command(name="giveaway", description="Create a giveaway")
     @app_commands.describe(prize="Prize", duration="Duration in hours (1-720)")
-    async def giveaway_cmd(self,
-                           inter: discord.Interaction,
-                           prize: str,
-                           duration: app_commands.Range[int, 1, 720]):
+    async def giveaway_cmd(
+        self,
+        inter: discord.Interaction,
+        prize: str,
+        duration: app_commands.Range[int, 1, 720],
+    ):
         if not _is_admin(inter.user):
             return await inter.response.send_message("Admins only.", ephemeral=True)
 
+        await inter.response.defer(ephemeral=True)   # ack within 3 s
+
         ch = inter.guild.get_channel(GIVEAWAY_CHANNEL_ID)
         if not ch:
-            return await inter.response.send_message("Giveaway channel not found.",
-                                                     ephemeral=True)
+            return await inter.followup.send("Giveaway channel missing.", ephemeral=True)
 
         ends_at = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=duration)
         gw = Giveaway(prize, ends_at)
         await gw.start(ch, self.pool)
-        self._background(gw).start()       # start updater loop
+        self._background(gw).start()
 
-        await inter.response.send_message("Giveaway created.", ephemeral=True)
+        await inter.followup.send("Giveaway created!", ephemeral=True)
 
-    # ---------- auto-refresh ----------
+    # ---------- 5-second updater ----------
     def _background(self, gw: Giveaway):
         @tasks.loop(seconds=5.0)
         async def _loop():
@@ -258,7 +252,7 @@ class GiveawayCog(commands.Cog):
             await gw.message.edit(embed=gw._embed(gw.message.guild))
         return _loop
 
-    # ---------- resume on reboot ----------
+    # ---------- resume unfinished ----------
     async def _resume(self):
         await self.bot.wait_until_ready()
         guild = self.bot.get_guild(GUILD_ID)
@@ -273,26 +267,25 @@ class GiveawayCog(commands.Cog):
             try:
                 msg = await chan.fetch_message(r["message_id"])
             except discord.NotFound:
-                # message deleted – mark inactive
                 await self.pool.execute(
                     "UPDATE giveaways SET active=FALSE WHERE message_id=$1",
                     r["message_id"]
                 )
                 continue
 
-            gw = Giveaway(
-                r["prize"],
-                dt.datetime.fromtimestamp(r["end_ts"], tz=dt.timezone.utc)
-            )
+            gw = Giveaway(r["prize"],
+                          dt.datetime.fromtimestamp(r["end_ts"], tz=dt.timezone.utc))
             gw.message = msg
             Giveaway.instances[msg.id] = gw
             await msg.edit(view=_GwButtons(gw, self.pool))
             self._background(gw).start()
 
 
-# --------------------------------------------------------------------
-# public entry point for on_ready() in ctfobot2_0.py
-# --------------------------------------------------------------------
+# ────────────────────────── public entry point ─────────────────────────
 async def setup(bot: commands.Bot, db: "Database"):
-    """Called by main file: await (import_module('cogs.giveaways').setup)(bot, db)"""
+    """
+    Called from ctfobot2_0.py:
+
+        await (import_module("cogs.giveaways").setup)(bot, db)
+    """
     await bot.add_cog(GiveawayCog(bot, db))

@@ -1632,6 +1632,7 @@ async def memberform(inter: discord.Interaction):
 @bot.event
 async def on_ready():
     await db.connect()
+    await (import_module("cogs.giveaways").setup)(bot, db)
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
     guild_obj = discord.Object(id=GUILD_ID)
@@ -1643,7 +1644,6 @@ async def on_ready():
 
     await resume_member_forms()
     await resume_staff_applications()
-    await (import_module("cogs.giveaways").setup)(bot, db)
 
     bot.loop.create_task(listen_for_code_changes())
 
