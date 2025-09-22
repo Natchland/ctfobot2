@@ -397,6 +397,11 @@ async def resume_member_forms():
             print(f"[resume_member_forms] Restored ActionView for form message {msg_id}")
         except Exception as e:
             print(f"[resume_member_forms] Error restoring view for {msg_id}: {e}")
+
+@bot.tree.error
+async def app_command_error(inter: discord.Interaction, error: Exception):
+    # shows *why* an interaction failed instead of silently timing-out
+    print("[app-cmd] exception:", type(error).__name__, error)
     
 # ══════════════════════════════════════════════════════════════════════
 #                        UTILITIES  /  EMBEDS
