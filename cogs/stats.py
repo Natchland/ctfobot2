@@ -339,9 +339,17 @@ class StatsCog(commands.Cog):
         """
         Return (success: bool, stats: dict[str,int])
 
-        We aggregate weapon-specific counters into totals so that
-        bullets/arrows/hits/headshots are never 0 when the player actually
-        has activity.
+        Aggregates the many weapon-specific Rust counters into totals
+        that the embed displays.  Handles keys such as
+
+            bullet_fired
+            pistol_bullet_fired
+            shotgun_fired
+            arrow_hit_player
+            harvested_wood
+            kill_stag   (→ deer)
+
+        so the numbers never come back as 0 when the player really has data.
         """
         async with aiohttp.ClientSession() as ses:
             url = (
@@ -351,50 +359,95 @@ class StatsCog(commands.Cog):
             async with ses.get(url) as r:
                 data = await r.json()
 
-        raw = data.get("playerstats", {}).get("stats")
-        if not raw:
+        raw_stats = data.get("playerstats", {}).get("stats")
+        if not raw_stats:
             return False, {}
 
-        raw_map = {s["name"]: s["value"] for s in raw}
+        raw = {s["name"]: s["value"] for s in raw_stats}
 
-        # helper to sum keys that start with / end with pattern
-        def sum_keys(prefix: str = "", suffix: str = "") -> int:
-            return sum(v for k, v in raw_map.items()
-                       if k.startswith(prefix) and k.endswith(suffix))
+        # helpers --------------------------------------------------------
+        def sum_keys(predicate):
+            return sum(v for k, v in raw.items() if predicate(k))
 
-        # aggregated totals
+        # ───── bullets
+        bullets_fired = (
+            raw.get("bullet_fired", 0)
+            + sum_keys(lambda k: k.endswith("_fired") and "bullet_" in k)
+            + raw.get("shotgun_fired", 0)
+        )
+        bullets_hit = (
+            sum_keys(lambda k: "bullet_hit" in k)
+            + sum_keys(lambda k: "shotgun_hit" in k)
+        )
+
+        # ───── arrows
+        arrows_fired = (
+            raw.get("arrow_fired", 0)
+            + raw.get("arrows_shot", 0)            # legacy key
+            + sum_keys(lambda k: k.startswith("arrow") and k.endswith("_fired"))
+        )
+        arrows_hit = (
+            raw.get("arrow_hit", 0)
+            + sum_keys(lambda k: k.startswith("arrow_hit"))
+        )
+
+        # ───── head-shots
+        headshots = (
+            raw.get("headshot", 0) +
+            sum_keys(lambda k: k.startswith("headshot_"))
+        )
+
+        # ───── kills & deaths
+        kill_player   = raw.get("kill_player", 0)            # current key
+        deaths_player = raw.get("death_player", raw.get("deaths", 0))
+
+        kill_scientist = raw.get("kill_scientist", 0)
+        kill_bear   = raw.get("kill_bear",   0)
+        kill_wolf   = raw.get("kill_wolf",   0)
+        kill_boar   = raw.get("kill_boar",   0)
+        kill_deer   = raw.get("kill_deer",   0) + raw.get("kill_stag", 0)
+        kill_horse  = raw.get("kill_horse",  0)
+        kill_player_other = raw.get("kill_chicken", 0)       # example extras
+
+        death_suicide = raw.get("death_suicide",    0)
+        death_fall    = raw.get("death_fall",       0)
+
+        # ───── resources
+        harvest_wood  = raw.get("harvest_wood", 0)  + raw.get("harvested_wood", 0)
+        harvest_stone = raw.get("harvest_stones", 0)+ raw.get("harvested_stones",0)
+        harvest_metal = raw.get("harvest_metal_ore", 0)
+        harvest_hqm   = raw.get("harvest_hq_metal_ore", 0)
+        harvest_sulfur= raw.get("harvest_sulfur_ore", 0)
+
         stats = {
-            # bullets / head-shots (all guns)
-            "shots_fired":      sum_keys(suffix="_fired"),
-            "shots_hit":        sum_keys(suffix="_hit"),
-            "headshot_hits":    sum_keys(prefix="headshot_"),
+            # PvP
+            "shots_fired":      bullets_fired,
+            "shots_hit":        bullets_hit,
+            "headshot_hits":    headshots,
+            "arrow_fired":      arrows_fired,
+            "arrow_hit":        arrows_hit,
+            "kill_player":      kill_player,
+            "death_player":     deaths_player,
 
-            # arrows
-            "arrow_fired":      sum_keys(suffix="_arrow_fired") + raw_map.get("arrow_fired", 0),
-            "arrow_hit":        sum_keys(suffix="_arrow_hit")   + raw_map.get("arrow_hit", 0),
+            # death reasons
+            "death_suicide":    death_suicide,
+            "death_fall":       death_fall,
 
-            # core PvP
-            "kill_player":      raw_map.get("kill_player",   0) + raw_map.get("player_kills",   0),
-            "death_player":     raw_map.get("death_player",  0) + raw_map.get("player_deaths",  0),
-
-            # other deaths
-            "death_suicide":    raw_map.get("death_suicide", 0),
-            "death_fall":       raw_map.get("death_fall",    0),
-
-            # NPC / animal kills (these keys usually exist already)
-            "kill_scientist":   raw_map.get("kill_scientist", 0),
-            "kill_bear":        raw_map.get("kill_bear",      0),
-            "kill_wolf":        raw_map.get("kill_wolf",      0),
-            "kill_boar":        raw_map.get("kill_boar",      0),
-            "kill_deer":        raw_map.get("kill_deer",      0),
-            "kill_horse":       raw_map.get("kill_horse",     0),
+            # kills
+            "kill_scientist":   kill_scientist,
+            "kill_bear":        kill_bear,
+            "kill_wolf":        kill_wolf,
+            "kill_boar":        kill_boar,
+            "kill_deer":        kill_deer,
+            "kill_horse":       kill_horse,
+            "kill_chicken":     kill_player_other,   # optional extra
 
             # resources
-            "harvest_wood":          raw_map.get("harvest_wood",           0),
-            "harvest_stones":        raw_map.get("harvest_stones",         0),
-            "harvest_metal_ore":     raw_map.get("harvest_metal_ore",      0),
-            "harvest_hq_metal_ore":  raw_map.get("harvest_hq_metal_ore",   0),
-            "harvest_sulfur_ore":    raw_map.get("harvest_sulfur_ore",     0),
+            "harvest_wood":         harvest_wood,
+            "harvest_stones":       harvest_stone,
+            "harvest_metal_ore":    harvest_metal,
+            "harvest_hq_metal_ore": harvest_hqm,
+            "harvest_sulfur_ore":   harvest_sulfur,
         }
 
         return True, stats
