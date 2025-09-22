@@ -414,6 +414,15 @@ class StatsCog(commands.Cog):
 
     # ═════════════ Rust user-stats helper ═════════════
     async def _rust_stats(self, sid: str):
+        """
+        Return (ok: bool, stats: dict[str,int])
+
+        • understands every key in the list you provided
+        • wildcard   '*'  = prefix-sum  (e.g. bullet_hit_*)
+        • _sum=True       = sum ALL listed variants
+        • _scale=x        = divide by x   (used for metres→miles, km→miles)
+        """
+
         async with aiohttp.ClientSession() as ses:
             url = (
                 "https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/"
@@ -428,100 +437,103 @@ class StatsCog(commands.Cog):
 
         raw = {s["name"]: s["value"] for s in raw_list}
 
-        # helper ------------------------------------------------------------
+        # ------------- helpers -------------
         def _sum_prefix(prefix: str) -> int:
             return sum(v for k, v in raw.items() if k.startswith(prefix))
 
         def get(*variants: str, _sum=False, _scale=1):
-            """Wildcard '*' = prefix match.  _sum sums all variants."""
+            """
+            Return   – first non-zero variant  or  sum of all variants.
+            Variant ending in '*' = prefix wildcard.
+            """
             if _sum:
                 total = 0
                 for var in variants:
                     total += (
-                        _sum_prefix(var[:-1]) if var.endswith("*") else raw.get(var, 0)
+                        _sum_prefix(var[:-1])
+                        if var.endswith("*") else
+                        raw.get(var, 0)
                     )
                 return int(total / _scale)
             for var in variants:
                 val = (
-                    _sum_prefix(var[:-1]) if var.endswith("*") else raw.get(var, 0)
+                    _sum_prefix(var[:-1])
+                    if var.endswith("*") else
+                    raw.get(var, 0)
                 )
                 if val:
                     return int(val / _scale)
             return 0
 
-        # combat ------------------------------------------------------------
+        # ------------- combat -------------
         bullets_fired = get("bullet_fired") + get("shotgun_fired")
         bullets_hit   = get("bullet_hit_*", "shotgun_hit_*", _sum=True)
-        arrows_fired  = get("arrow_fired")
+        arrows_fired  = get("arrow_fired", "arrows_shot")
         arrows_hit    = get("arrow_hit_*", _sum=True)
-        headshots     = get("headshots", "headshot")
+        headshots     = get("headshot", "headshots")
         kills_player  = get("kill_player")
         deaths_player = get("death_player", "deaths")
 
-        # animals & deaths --------------------------------------------------
+        # ------------- animals / misc -------------
         stats = {
             "kill_scientist": get("kill_scientist"),
             "kill_bear":      get("kill_bear"),
             "kill_wolf":      get("kill_wolf"),
             "kill_boar":      get("kill_boar"),
             "kill_deer":      get("kill_stag"),
-            "kill_horse":     get("kill_horse"),
-            "death_suicide":  get("death_suicide"),
+            "kill_horse":     get("horse_mounted_count"),      # mounts ~ rides
+            "death_suicide":  get("death_suicide","death_selfinflicted"),
             "death_fall":     get("death_fall"),
         }
 
-        # resources (nodes) -------------------------------------------------
+        # ------------- resources – nodes -------------
         stats.update({
-            "harvest_wood":  get("harvest.wood",  "harvested_wood"),
-            "harvest_stones":get("harvest.stones","harvested_stones"),
+            "harvest_wood":  get("harvested_wood",  "harvest.wood"),
+            "harvest_stones":get("harvested_stones","harvest.stones"),
             "harvest_metal_ore": get(
-                "harvest.metal_ore", "harvest_metal_ore", "acquired_metal.ore", _sum=True
+                "acquired_metal.ore", "harvest.metal_ore", _sum=True
             ),
-            "harvest_hq_metal_ore": get(
-                "harvest.hq_metal_ore", "harvest_hq_metal_ore",
-                "acquired_highqualitymetal.ore", "acquired_hq_metal_ore", _sum=True
-            ),
-            "harvest_sulfur_ore": get(
-                "harvest.sulfur_ore", "harvest_sulfur_ore", "acquired_sulfur.ore", _sum=True
-            ),
+            "harvest_hq_metal_ore": 0,   # HQM not in your list – keep 0 / N-A
+            "harvest_sulfur_ore":    0,   # Sulfur not in your list – keep 0 / N-A
         })
 
-        # resources (pickups) ----------------------------------------------
+        # ------------- resources – pick-ups -------------
         stats.update({
             "acq_lowgrade": get("acquired_lowgradefuel"),
             "acq_scrap":    get("acquired_scrap"),
-            "acq_cloth":    get("acquired_cloth",   "acquired_cloth.item"),
-            "acq_leather":  get("acquired_leather", "acquired_leather.item"),
+            "acq_cloth":    get("harvested_cloth",  "acquired_cloth",  "acquired_cloth.item"),
+            "acq_leather":  get("harvested_leather","acquired_leather","acquired_leather.item"),
         })
 
-        # building / loot ---------------------------------------------------
+        # ------------- building / loot / social -------------
         stats.update({
-            "build_place":   get("building_blocks_placed",  "buildings_placed",
-                                 "structure_built"),
-            "build_upgrade": get("building_blocks_upgraded","buildings_upgraded",
-                                 "structure_upgrade"),
-            "barrels":       get("destroyed_barrel", "destroyed_barrel_town",
-                                 "destroyed_barrel_snowball", _sum=True),
-            "bps":           get("blueprint_studied", "blueprints_studied"),
-            "pipes":         get("pipes_connected", "fluid_links_connected"),
-            "wires":         get("wires_connected", "wiretool_connected"),
-            "waves":         get("gesture_wave", "friendly_wave"),
+            "build_place":   get("placed_blocks",  "building_blocks_placed",
+                                 "buildings_placed", "structure_built"),
+            "build_upgrade": get("upgraded_blocks","building_blocks_upgraded",
+                                 "buildings_upgraded","structure_upgrade"),
+            "barrels":       get("destroyed_barrels","destroyed_barrel*", _sum=True),
+            "bps":           get("blueprint_studied"),
+            "pipes":         get("pipes_connected"),
+            "wires":         get("wires_connected","tincanalarms_wired"),
+            "waves":         get("gesture_wave_count","waved_at_players","gesture_wave"),
         })
 
-        # horse / consumption / UI -----------------------------------------
+        # ------------- horse / consumption / UI -------------
+        # horse distance can be metres or km – check both then convert to miles
+        metres = get("horse_distance_ridden", _sum=True)  # metres
+        km     = get("horse_distance_ridden_km")          # km
+        miles  = (metres / 1609.344) if metres else (km * 0.621371)  # km→mi
         stats.update({
-            "horse_miles":   get("horse_distance", "horse_distance_travelled",
-                                 _sum=True, _scale=1609.344),
-            "horses_ridden": get("horses_ridden", "horse_ridden"),
-            "calories":      get("calories_consumed", "calories_consumed_total"),
-            "water":         get("water_consumed",    "water_consumed_total"),
-            "map_open":      get("map_opened", "opened_map", "map_open"),
-            "inv_open":      get("inventory_opened", "opened_inventory",
-                                 "inventory_open"),
-            "items_crafted": get("items_crafted", "crafted_items"),
+            "horse_miles":       int(miles),
+            "horses_ridden":     get("horse_mounted_count"),
+            "calories":          get("calories_consumed"),
+            "water":             get("water_consumed"),
+            "map_open":          get("MAP_OPENED",  "map_opened",  "map_open"),
+            "inv_open":          get("INVENTORY_OPENED","inventory_opened"),
+            "items_crafted":     get("CRAFTING_OPENED", "items_crafted", "crafted_items"),
         })
 
-        # core combat -------------------------------------------------------
+        # ------------- core combat numbers -------------
         stats.update({
             "shots_fired":   bullets_fired,
             "shots_hit":     bullets_hit,
@@ -531,6 +543,7 @@ class StatsCog(commands.Cog):
             "kill_player":   kills_player,
             "death_player":  deaths_player,
         })
+
         return True, stats
 
 # ╔══════════════════════════════════════════════════════════╗
