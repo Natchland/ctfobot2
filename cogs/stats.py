@@ -4,20 +4,22 @@
 #   /check player <steam-id-or-url>   – ban & profile check
 #   /stats rust  <steam-id-or-url>    – Rust hours + detailed in-game stats
 #
-# Requires env vars
-#   STEAM_API_KEY       (Steam Web-API key)         – required
-#   BATTLEMETRICS_TOKEN (BM token, raises limits)   – optional
+# Needs environment variables
+#   STEAM_API_KEY        – Steam Web-API key              (required)
+#   BATTLEMETRICS_TOKEN  – BM token to raise rate limits  (optional)
 #
 # ────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
-import os, re, aiohttp, datetime as dt, discord
+
+import os, re, aiohttp, collections, datetime as dt, discord
 from discord.ext import commands
 from discord import app_commands
 
-STEAM_API_KEY  = os.getenv("STEAM_API_KEY")
-BM_TOKEN       = os.getenv("BATTLEMETRICS_TOKEN", "")
-BM_HEADERS     = {"Authorization": f"Bearer {BM_TOKEN}"} if BM_TOKEN else {}
+STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+
+BM_TOKEN   = os.getenv("BATTLEMETRICS_TOKEN", "")
+BM_HEADERS = {"Authorization": f"Bearer {BM_TOKEN}"} if BM_TOKEN else {}
 
 APPID_RUST = 252490
 PROFILE_RE = re.compile(r"https?://steamcommunity\.com/(?:profiles|id)/([^/]+)")
@@ -38,12 +40,16 @@ class StatsCog(commands.Cog):
         if sid is None:
             return await inter.followup.send("Unable to resolve SteamID.", ephemeral=True)
 
-        bans, profile                          = await self._steam_bans_and_profile(sid)
-        bm_prof, bm_bans, eac, name_history    = await self._bm_info(sid)
+        bans, profile                       = await self._steam_bans_and_profile(sid)
+        bm_prof, bm_bans, eac, name_history = await self._bm_info(sid)
 
         danger = (
-            bans["VACBanned"] or bans["CommunityBanned"] or bans["NumberOfGameBans"]
-            or bans["EconomyBan"] != "none" or eac or bm_bans
+            bans["VACBanned"]
+            or bans["CommunityBanned"]
+            or bans["NumberOfGameBans"]
+            or bans["EconomyBan"] != "none"
+            or eac
+            or bm_bans
         )
         colour = discord.Color.red() if danger else discord.Color.green()
 
@@ -82,7 +88,9 @@ class StatsCog(commands.Cog):
             inline=True,
         )
         e.add_field(name="Trade Ban", value=bans["EconomyBan"].capitalize(), inline=True)
-        e.add_field(name="Days Since Last Ban", value=bans["DaysSinceLastBan"], inline=True)
+        e.add_field(
+            name="Days Since Last Ban", value=bans["DaysSinceLastBan"], inline=True
+        )
 
         # BM / EAC
         if eac is not None:
@@ -94,16 +102,20 @@ class StatsCog(commands.Cog):
         if bm_bans:
             lines = []
             for b in bm_bans[:5]:
-                org  = b["attributes"].get("organization", {}).get("name") or "Org"
+                org = b["attributes"].get("organization", {}).get("name") or "Org"
                 reas = b["attributes"].get("reason") or "No reason"
-                exp  = b["attributes"].get("expires") or "Permanent"
+                exp = b["attributes"].get("expires") or "Permanent"
                 lines.append(f"• **{org}** – {reas} (exp: {exp[:10]})")
             if len(bm_bans) > 5:
                 lines.append(f"…and {len(bm_bans) - 5} more.")
-            e.add_field(name=f"BM bans ({len(bm_bans)})", value="\n".join(lines), inline=False)
+            e.add_field(
+                name=f"BM bans ({len(bm_bans)})", value="\n".join(lines), inline=False
+            )
 
         if name_history:
-            e.add_field(name="Previous names", value="\n".join(name_history[:10]), inline=False)
+            e.add_field(
+                name="Previous names", value="\n".join(name_history[:10]), inline=False
+            )
 
         await inter.followup.send(embed=e, ephemeral=True)
 
@@ -121,12 +133,32 @@ class StatsCog(commands.Cog):
         # play-time + persona
         total_h, two_w_h, last_play, profile = await self._playtime_and_persona(sid)
 
+        # Steam rich-presence
+        steam_online = profile.get("gameid") == str(APPID_RUST)
+        steam_server = profile.get("gameextrainfo") if steam_online else None
+
         # achievements
         unlocked, total_ach, ach_pct = await self._achievements(sid)
 
         # in-game stats
         stats_ok, st = await self._rust_stats(sid)
 
+        # BattleMetrics data
+        bm_prof, *_ = await self._bm_info(sid)
+        bm_online = False
+        bm_cur_srv = None
+        bm_total_sessions = 0
+        bm_top_servers: list[str] = []
+        if bm_prof:
+            (
+                _sessions,
+                bm_online,
+                bm_cur_srv,
+                bm_total_sessions,
+                bm_top_servers,
+            ) = await self._bm_sessions(bm_prof["id"])
+
+        # ───── embed ─────
         e = (
             discord.Embed(
                 title=f"Rust stats – {profile.get('personaname','Unknown')}",
@@ -138,38 +170,54 @@ class StatsCog(commands.Cog):
         if (av := profile.get("avatarfull")):
             e.set_thumbnail(url=av)
 
-        e.add_field(name="Total hours",  value=f"{total_h:,}", inline=True)
+        e.add_field(name="Total hours", value=f"{total_h:,}", inline=True)
         e.add_field(name="Last 2 weeks", value=f"{two_w_h:,}", inline=True)
-        e.add_field(name="Last played",  value=last_play,      inline=True)
+        e.add_field(name="Last played", value=last_play, inline=True)
         e.add_field(
             name="Achievements",
             value=f"{unlocked}/{total_ach} ({ach_pct})",
             inline=True,
         )
 
+        # presence block
+        pres_lines = [
+            f"Steam online: **{'Yes' if steam_online else 'No'}**"
+            + (f" – “{steam_server}”" if steam_server else "")
+        ]
+        if bm_prof:
+            pres_lines.append(
+                f"BM online: **{'Yes' if bm_online else 'No'}**"
+                + (f" – {bm_cur_srv}" if bm_online and bm_cur_srv else "")
+            )
+            pres_lines.append(f"BM sessions: **{bm_total_sessions:,}**")
+            if bm_top_servers:
+                pres_lines.append("Top servers: " + ", ".join(bm_top_servers))
+        e.add_field(name="Presence", value="\n".join(pres_lines), inline=False)
+
         if not stats_ok:
             e.add_field(
-                name="Detailed stats",
-                value="Private / not available.",
-                inline=False,
+                name="Detailed stats", value="Private / not available.", inline=False
             )
             return await inter.followup.send(embed=e, ephemeral=True)
 
         # ───── PvP block (safe divide) ─────
-        kills   = st.get("kill_player",   0)
-        deaths  = st.get("death_player",  0)
-        kd_val  = f"{kills / deaths:.2f}" if deaths else ("∞" if kills else "0")
+        kills = st.get("kill_player", 0)
+        deaths = st.get("death_player", 0)
+        kd_val = f"{kills / deaths:.2f}" if deaths else ("∞" if kills else "0")
         bullets_fired = st.get("shots_fired", 0)
-        bullets_hit   = st.get("shots_hit",   0)
-        headshots     = st.get("headshot_hits", 0)
-        accuracy      = f"{(bullets_hit / bullets_fired * 100):.1f}%" if bullets_fired else "0%"
-        hs_accuracy   = f"{(headshots  / bullets_hit * 100):.1f}%"     if bullets_hit   else "0%"
+        bullets_hit = st.get("shots_hit", 0)
+        headshots = st.get("headshot_hits", 0)
+        accuracy = (
+            f"{(bullets_hit / bullets_fired * 100):.1f}%" if bullets_fired else "0%"
+        )
+        hs_accuracy = (
+            f"{(headshots / bullets_hit * 100):.1f}%" if bullets_hit else "0%"
+        )
 
         e.add_field(
             name="PvP",
             value=(
-                f"Kills **{kills:,}** / Deaths **{deaths:,}** "
-                f"(K/D {kd_val})\n"
+                f"Kills **{kills:,}** / Deaths **{deaths:,}** (K/D {kd_val})\n"
                 f"Bullets **{bullets_hit:,}/{bullets_fired:,}** ({accuracy})\n"
                 f"Head-shot accuracy {hs_accuracy}"
             ),
@@ -191,15 +239,12 @@ class StatsCog(commands.Cog):
 
         # bow stats
         arrows_fired = st.get("arrow_fired", 0)
-        arrows_hit   = st.get("arrow_hit",   0)
-        arrow_acc    = f"{(arrows_hit / arrows_fired * 100):.1f}%" if arrows_fired else "0%"
+        arrows_hit = st.get("arrow_hit", 0)
+        arrow_acc = f"{(arrows_hit / arrows_fired * 100):.1f}%" if arrows_fired else "0%"
 
         e.add_field(
             name="Bow",
-            value=(
-                f"Arrows **{arrows_hit:,}/{arrows_fired:,}**\n"
-                f"Accuracy {arrow_acc}"
-            ),
+            value=f"Arrows **{arrows_hit:,}/{arrows_fired:,}**\nAccuracy {arrow_acc}",
             inline=True,
         )
 
@@ -220,9 +265,9 @@ class StatsCog(commands.Cog):
             value=(
                 f"Wood **{st.get('harvest_wood',0):,}**\n"
                 f"Stone **{st.get('harvest_stones',0):,}**\n"
-                f"Metal **{st.get('harvest_metal_ore',0):,}**\n"
-                f"HQ Metal **{st.get('harvest_hq_metal_ore',0):,}**\n"
-                f"Sulfur **{st.get('harvest_sulfur_ore',0):,}**"
+                f"Metal Ore **{st.get('harvest_metal_ore',0):,}**\n"
+                f"HQ-Metal Ore **{st.get('harvest_hq_metal_ore',0):,}**\n"
+                f"Sulfur Ore **{st.get('harvest_sulfur_ore',0):,}**"
             ),
             inline=False,
         )
@@ -231,6 +276,7 @@ class StatsCog(commands.Cog):
 
     # ───────────────── helper methods ─────────────────
     async def _resolve(self, raw: str) -> str | None:
+        # SteamID64 or any community URL → SteamID64
         if raw.isdigit() and len(raw) >= 16:
             return raw
         m = PROFILE_RE.search(raw)
@@ -272,17 +318,64 @@ class StatsCog(commands.Cog):
         if not data.get("data"):
             return None, [], None, []
         prof = data["data"][0]
-        pid  = prof["id"]
+        pid = prof["id"]
         async with aiohttp.ClientSession() as ses:
             url = f"https://api.battlemetrics.com/bans?filter[player]={pid}&sort=-timestamp"
             async with ses.get(url, headers=BM_HEADERS) as r:
                 bans = (await r.json()).get("data", [])
         flags = prof["attributes"].get("flags", [])
-        eac   = any("eac" in (f or "").lower() for f in flags)
-        names = [n.get("name","Unknown") for n in prof["attributes"].get("names", [])[::-1]]
+        eac = any("eac" in (f or "").lower() for f in flags)
+        names = [
+            n.get("name", "Unknown")
+            for n in prof["attributes"].get("names", [])[::-1]
+        ]
         return prof, bans, eac, names
 
+    async def _bm_sessions(self, pid: str):
+        """
+        Returns
+            sessions          – list (last 100)
+            online            – bool
+            current_srv_name  – str|None
+            total_sessions    – int
+            top_servers       – list[str] (three most common)
+        """
+        url = (
+            f"https://api.battlemetrics.com/sessions?"
+            f"filter[player]={pid}&page[size]=100&include=server&sort=-start"
+        )
+        async with aiohttp.ClientSession() as ses, ses.get(url, headers=BM_HEADERS) as r:
+            data = await r.json()
+
+        sessions = data.get("data", [])
+        total_sessions = len(sessions)
+
+        # map server-id → human name
+        srv_names = {
+            i["id"]: i["attributes"]["name"]
+            for i in data.get("included", [])
+            if i["type"] == "server"
+        }
+
+        online = False
+        current_srv_name = None
+        if sessions:
+            latest = sessions[0]
+            if latest["attributes"]["end"] is None:
+                online = True
+                sid = latest["relationships"]["server"]["data"]["id"]
+                current_srv_name = srv_names.get(sid, "Unknown")
+
+        freq = collections.Counter(
+            srv_names.get(s["relationships"]["server"]["data"]["id"], "Unknown")
+            for s in sessions
+        )
+        top_servers = [f"{n} ({c})" for n, c in freq.most_common(3)]
+
+        return sessions, online, current_srv_name, total_sessions, top_servers
+
     async def _playtime_and_persona(self, sid: str):
+        # total hours & last-played extraction
         async with aiohttp.ClientSession() as ses:
             url = (
                 "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
@@ -290,7 +383,10 @@ class StatsCog(commands.Cog):
             )
             async with ses.get(url) as r:
                 og = await r.json()
-        g = next((x for x in og.get("response", {}).get("games", []) if x["appid"] == APPID_RUST), None)
+        g = next(
+            (x for x in og.get("response", {}).get("games", []) if x["appid"] == APPID_RUST),
+            None,
+        )
         total_h = g["playtime_forever"] // 60 if g else 0
         two_w_h = g.get("playtime_2weeks", 0) // 60 if g else 0
 
@@ -301,7 +397,10 @@ class StatsCog(commands.Cog):
             )
             async with ses.get(url) as r:
                 rp = await r.json()
-        recent = next((x for x in rp.get("response", {}).get("games", []) if x["appid"] == APPID_RUST), None)
+        recent = next(
+            (x for x in rp.get("response", {}).get("games", []) if x["appid"] == APPID_RUST),
+            None,
+        )
         last_play = (
             dt.datetime.utcfromtimestamp(recent["playtime_at"]).strftime("%Y-%m-%d")
             if recent and "playtime_at" in recent
@@ -328,22 +427,16 @@ class StatsCog(commands.Cog):
                 ach = await r.json()
         if not ach.get("playerstats", {}).get("success"):
             return "Private", "N/A", "N/A"
-        lst       = ach["playerstats"]["achievements"]
-        unlocked  = sum(1 for a in lst if a["achieved"])
-        total     = len(lst)
-        pct       = f"{unlocked / total * 100:.1f}%"
+        lst = ach["playerstats"]["achievements"]
+        unlocked = sum(1 for a in lst if a["achieved"])
+        total = len(lst)
+        pct = f"{unlocked / total * 100:.1f}%"
         return unlocked, total, pct
 
     # ──────────────────────────────────────────────────────
-    # UPDATED helper – includes all known resource key variants
+    # Rust user-stats helper (unchanged from previous answer)
     # ──────────────────────────────────────────────────────
     async def _rust_stats(self, sid: str):
-        """
-        Return (ok: bool, stats: dict[str,int])
-
-        – Reads both dot-notation and legacy underscore keys
-        – Merges 'harvest.*' and 'acquired_*' variants for each ore
-        """
         async with aiohttp.ClientSession() as ses:
             url = (
                 "https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/"
@@ -358,80 +451,69 @@ class StatsCog(commands.Cog):
 
         raw = {s["name"]: s["value"] for s in raw_list}
 
-        # helper to sum grouped keys
         def sum_keys(prefix: str) -> int:
             return sum(v for k, v in raw.items() if k.startswith(prefix))
 
-        # ---- combat
         bullets_fired = raw.get("bullet_fired", 0) + raw.get("shotgun_fired", 0)
-        bullets_hit   = sum_keys("bullet_hit_") + sum_keys("shotgun_hit_")
-        arrows_fired  = raw.get("arrow_fired", 0)
-        arrows_hit    = sum_keys("arrow_hit_")
-        headshots     = raw.get("headshots", raw.get("headshot", 0))
+        bullets_hit = sum_keys("bullet_hit_") + sum_keys("shotgun_hit_")
+        arrows_fired = raw.get("arrow_fired", 0)
+        arrows_hit = sum_keys("arrow_hit_")
+        headshots = raw.get("headshots", raw.get("headshot", 0))
 
-        kills_player  = raw.get("kill_player", 0)
+        kills_player = raw.get("kill_player", 0)
         deaths_player = raw.get("death_player", raw.get("deaths", 0))
 
-        # ---- animal / NPC kills
         kill_scientist = raw.get("kill_scientist", 0)
-        kill_bear      = raw.get("kill_bear", 0)
-        kill_wolf      = raw.get("kill_wolf", 0)
-        kill_boar      = raw.get("kill_boar", 0)
-        kill_deer      = raw.get("kill_stag", 0)     # schema uses stag
-        kill_horse     = raw.get("kill_horse", 0)
+        kill_bear = raw.get("kill_bear", 0)
+        kill_wolf = raw.get("kill_wolf", 0)
+        kill_boar = raw.get("kill_boar", 0)
+        kill_deer = raw.get("kill_stag", 0)
+        kill_horse = raw.get("kill_horse", 0)
 
-        # ---- other deaths
-        death_suicide  = raw.get("death_suicide", 0)
-        death_fall     = raw.get("death_fall",    0)
+        death_suicide = raw.get("death_suicide", 0)
+        death_fall = raw.get("death_fall", 0)
 
-        # ---- resources
-        harvest_wood  = raw.get("harvest.wood",   raw.get("harvested_wood",   0))
+        harvest_wood = raw.get("harvest.wood", raw.get("harvested_wood", 0))
         harvest_stone = raw.get("harvest.stones", raw.get("harvested_stones", 0))
 
         harvest_metal_ore = (
-              raw.get("harvest.metal_ore", 0)
-            + raw.get("harvest_metal_ore", 0)          # legacy underscore
+            raw.get("harvest.metal_ore", 0)
+            + raw.get("harvest_metal_ore", 0)
             + raw.get("acquired_metal.ore", 0)
         )
-
         harvest_hq_metal_ore = (
-              raw.get("harvest.hq_metal_ore", 0)
-            + raw.get("harvest_hq_metal_ore", 0)       # legacy underscore
+            raw.get("harvest.hq_metal_ore", 0)
+            + raw.get("harvest_hq_metal_ore", 0)
             + raw.get("acquired_highqualitymetal.ore", 0)
-            + raw.get("acquired_hq_metal_ore", 0)      # very old servers
+            + raw.get("acquired_hq_metal_ore", 0)
         )
-
         harvest_sulfur_ore = (
-              raw.get("harvest.sulfur_ore", 0)
-            + raw.get("harvest_sulfur_ore", 0)         # legacy underscore
+            raw.get("harvest.sulfur_ore", 0)
+            + raw.get("harvest_sulfur_ore", 0)
             + raw.get("acquired_sulfur.ore", 0)
         )
 
         stats = {
-            # PvP
-            "shots_fired":      bullets_fired,
-            "shots_hit":        bullets_hit,
-            "headshot_hits":    headshots,
-            "arrow_fired":      arrows_fired,
-            "arrow_hit":        arrows_hit,
-            "kill_player":      kills_player,
-            "death_player":     deaths_player,
-            # deaths
-            "death_suicide":    death_suicide,
-            "death_fall":       death_fall,
-            # kills
-            "kill_scientist":   kill_scientist,
-            "kill_bear":        kill_bear,
-            "kill_wolf":        kill_wolf,
-            "kill_boar":        kill_boar,
-            "kill_deer":        kill_deer,
-            "kill_horse":       kill_horse,
-            # resources
-            "harvest_wood":         harvest_wood,
-            "harvest_stones":       harvest_stone,
-            "harvest_metal_ore":    harvest_metal_ore,
+            "shots_fired": bullets_fired,
+            "shots_hit": bullets_hit,
+            "headshot_hits": headshots,
+            "arrow_fired": arrows_fired,
+            "arrow_hit": arrows_hit,
+            "kill_player": kills_player,
+            "death_player": deaths_player,
+            "death_suicide": death_suicide,
+            "death_fall": death_fall,
+            "kill_scientist": kill_scientist,
+            "kill_bear": kill_bear,
+            "kill_wolf": kill_wolf,
+            "kill_boar": kill_boar,
+            "kill_deer": kill_deer,
+            "kill_horse": kill_horse,
+            "harvest_wood": harvest_wood,
+            "harvest_stones": harvest_stone,
+            "harvest_metal_ore": harvest_metal_ore,
             "harvest_hq_metal_ore": harvest_hq_metal_ore,
-            "harvest_sulfur_ore":   harvest_sulfur_ore,
+            "harvest_sulfur_ore": harvest_sulfur_ore,
         }
         return True, stats
 
