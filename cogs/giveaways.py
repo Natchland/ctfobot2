@@ -1,7 +1,6 @@
-# cogs/giveaways.py  –  production-ready restart-persistent giveaway cog
+# cogs/giveaways.py  –  production-ready giveaway cog (2024-05-xx)
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import random
 from typing import Dict, Optional, TYPE_CHECKING
@@ -11,28 +10,28 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-if TYPE_CHECKING:            # forward-declare for type checkers only
+if TYPE_CHECKING:            # forward ref for type checkers only
     from ctfobot2_0 import Database
 
 
-# ────────────────────────────────  CONFIG  ────────────────────────────────
+# ─────────────────────────────  CONFIG  ──────────────────────────────
 GUILD_ID            = 1377035207777194005
 GIVEAWAY_CHANNEL_ID = 1413929735658016899          # #giveaways
 ACTIVE_ROLE_ID      = 1403337937722019931          # “Active Member”
 
 ADMIN_ROLE_IDS       = {1377103244089622719}
 STAFF_BONUS_ROLE_IDS = {
-    1377077466513932338,
-    1377084533706588201,
-    1410659214959054988,
+    1377077466513932338,       # Group-Leader
+    1377084533706588201,       # Player-Management
+    1410659214959054988,       # Recruitment
 }
 
-STREAK_BONUS_PER_SET = 3
-STAFF_BONUS_PER_WEEK = 3
-BOOST_BONUS_PER_WEEK = 3
+STREAK_BONUS_PER_SET = 3       # +3 per full 3-day streak
+STAFF_BONUS_PER_WEEK = 3       # +3 per week with staff role
+BOOST_BONUS_PER_WEEK = 3       # +3 per week of Nitro boost
 
 
-# ──────────────────────────────  HELPERS  ───────────────────────────────
+# ───────────────────────────  HELPERS  ───────────────────────────────
 def _fmt_left(td: dt.timedelta) -> str:
     sec = max(int(td.total_seconds()), 0)
     d, sec = divmod(sec, 86_400)
@@ -47,47 +46,56 @@ def _fmt_left(td: dt.timedelta) -> str:
     return f"{s}s"
 
 
-def _is_admin(m: discord.Member) -> bool:
+def _is_admin(mem: discord.Member) -> bool:
     return (
-        m.guild_permissions.administrator
-        or m.id == m.guild.owner_id
-        or any(r.id in ADMIN_ROLE_IDS for r in m.roles)
+        mem.guild_permissions.administrator
+        or mem.id == mem.guild.owner_id
+        or any(r.id in ADMIN_ROLE_IDS for r in mem.roles)
     )
 
 
 async def _activity_map(pool: asyncpg.Pool) -> dict[int, dict]:
-    """Load the entire activity table once each refresh."""
     rows = await pool.fetch("SELECT * FROM activity")
     return {r["user_id"]: dict(r) for r in rows}
 
 
-# ───────────────────────────── Giveaway obj ─────────────────────────────
+# ─────────────────────────── Giveaway obj ────────────────────────────
 class Giveaway:
-    instances: Dict[int, "Giveaway"] = {}          # message_id ➜ instance
+    instances: Dict[int, "Giveaway"] = {}          # msg_id → instance
 
     def __init__(self, prize: str, ends_at: dt.datetime):
-        self.prize       = prize
-        self.ends_at     = ends_at
-        self.started_at  = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        self.prize      = prize
+        self.ends_at    = ends_at
+        self.started_at = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 
-        self.message:  Optional[discord.Message] = None
-        self.entrants: Dict[int, int]            = {}
+        self.message: Optional[discord.Message] = None
+        self.entrants: Dict[int, int]           = {}
 
     # ---------- ticket calculation ----------
     async def _tickets_for(self, m: discord.Member,
                            activity: dict[int, dict]) -> int:
         if ACTIVE_ROLE_ID not in [r.id for r in m.roles]:
             return 0
+
         now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-        t = 1
+        tickets = 1                                           # base ticket
+
+        # ── activity streak bonus (capped to giveaway lifetime) ──
         if rec := activity.get(m.id):
-            t += (rec["streak"] // 3) * STREAK_BONUS_PER_SET
+            days_since_start = (now.date() - self.started_at.date()).days + 1
+            effective_streak = min(rec["streak"], days_since_start)
+            tickets += (effective_streak // 3) * STREAK_BONUS_PER_SET
+
+        # ── booster bonus ──
         if m.premium_since:
             effective = max(m.premium_since, self.started_at)
-            t += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
+            tickets += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
+
+        # ── staff role bonus ──
         if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
-            t += ((now - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
-        return t
+            tickets += ((now - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
+
+        return tickets
 
     async def recompute(self, guild: discord.Guild, pool: asyncpg.Pool):
         activity = await _activity_map(pool)
@@ -99,7 +107,7 @@ class Giveaway:
             if n:
                 self.entrants[m.id] = n
 
-    # ---------- embed ----------
+    # ---------- embed builder ----------
     def _embed(self, guild: discord.Guild,
                *, ended=False,
                winner: Optional[discord.Member] = None) -> discord.Embed:
@@ -110,7 +118,8 @@ class Giveaway:
             e.add_field(name="Time left", value="**Ended**", inline=False)
         else:
             left = self.ends_at - dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-            e.add_field(name="Time left", value=f"**{_fmt_left(left)}**", inline=False)
+            e.add_field(name="Time left", value=f"**{_fmt_left(left)}**",
+                        inline=False)
 
         e.add_field(name="Eligibility",
                     value=f"Only <@&{ACTIVE_ROLE_ID}> can win.",
@@ -170,7 +179,7 @@ class Giveaway:
         return guild.get_member(winner_id)
 
 
-# ───────────────────────────── Button View ────────────────────────────
+# ───────────────────────────  Buttons View  ───────────────────────────
 class _GwButtons(discord.ui.View):
     def __init__(self, gw: Giveaway, pool: asyncpg.Pool):
         super().__init__(timeout=None)
@@ -200,14 +209,14 @@ class _GwButtons(discord.ui.View):
         await inter.response.send_message("Cancelled.", ephemeral=True)
 
 
-# ───────────────────────────── Cog class ───────────────────────────────
+# ──────────────────────────────  COG  ─────────────────────────────────
 class GiveawayCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: "Database"):
         self.bot  = bot
         self.pool = db.pool
         bot.loop.create_task(self._resume())
 
-    # ---------- slash command ----------
+    # ---------- /giveaway ----------
     @app_commands.command(name="giveaway", description="Create a giveaway")
     @app_commands.describe(prize="Prize", duration="Duration in hours (1-720)")
     async def giveaway_cmd(
@@ -219,7 +228,7 @@ class GiveawayCog(commands.Cog):
         if not _is_admin(inter.user):
             return await inter.response.send_message("Admins only.", ephemeral=True)
 
-        await inter.response.defer(ephemeral=True)   # ack within 3 s
+        await inter.response.defer(ephemeral=True)          # acknowledge quickly
 
         ch = inter.guild.get_channel(GIVEAWAY_CHANNEL_ID)
         if not ch:
@@ -282,7 +291,7 @@ class GiveawayCog(commands.Cog):
             self._background(gw).start()
 
 
-# ────────────────────────── public entry point ─────────────────────────
+# ──────────────────────  public entry point  ─────────────────────────
 async def setup(bot: commands.Bot, db: "Database"):
     """
     Called from ctfobot2_0.py:
