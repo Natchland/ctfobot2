@@ -370,8 +370,9 @@ class StatsCog(commands.Cog):
 
         sid = await self._resolve(steamid)
         if not sid:
-            return await inter.followup.send("Unable to resolve SteamID.",
-                                            ephemeral=True)
+            return await inter.followup.send(
+                "Unable to resolve SteamID.", ephemeral=True
+            )
 
         # ───── top-level data ─────
         tot_h, twk_h, last_play, profile = \
@@ -395,8 +396,9 @@ class StatsCog(commands.Cog):
                 "Detailed stats are private / unavailable.", ephemeral=True
             )
 
-        # ───── derived values ─────
+        # ───── derived numbers ─────
         fmt = lambda n: "N/A" if n in (None, 0, "N/A") else f"{n:,}"
+
         bullets_fired = st["shots_fired"]
         bullets_hit   = st["shots_hit"]
         arrows_fired  = st["arrow_fired"]
@@ -414,8 +416,9 @@ class StatsCog(commands.Cog):
         kd      = f"{kills/deaths:.2f}" if deaths else ("∞" if kills else "0")
 
         # ───── embed ─────
-        colour = 0x2F3136  # dark grey Discord bg (looks good with white text)
-        e = (discord.Embed(
+        colour = 0x2F3136  # dark-grey Discord BG
+        e = (
+            discord.Embed(
                 title=f"Rust stats – [{profile.get('personaname')}]",
                 url=profile.get("profileurl"),
                 colour=colour
@@ -425,111 +428,106 @@ class StatsCog(commands.Cog):
         if profile.get("avatarfull"):
             e.set_thumbnail(url=profile["avatarfull"])
 
-        # header row
-        e.add_field(name="Hours",
-                    value=f"Total **{fmt(tot_h)}**\n2-weeks **{fmt(twk_h)}**",
+        # ───── neat blocks ─────
+        summary = "\n".join([
+            f"Total hrs  : {fmt(tot_h)}",
+            f"2-wks hrs  : {fmt(twk_h)}",
+            f"Last played: {last_play}",
+            f"Achievement: {ach_unl}/{ach_tot} ({ach_pct})",
+            f"Steam pres.: {pres_steam}",
+            f"BM pres.   : {bm_online}",
+            f"BM sessions: {fmt(bm_sessions)}",
+        ])
+        e.add_field(name="Summary",
+                    value=f"```ini\n{summary}\n```",
+                    inline=False)
+
+        pvp = "\n".join([
+            f"Kills  : {fmt(kills)}",
+            f"Deaths : {fmt(deaths)}  (K/D {kd})",
+            f"Bullets: {fmt(bullets_hit)} / {fmt(bullets_fired)}  ({bullet_acc})",
+            f"Head-shot acc.: {head_acc}",
+            f"Arrows : {fmt(arrows_hit)} / {fmt(arrows_fired)}  ({arrow_acc})",
+        ])
+        e.add_field(name="PvP",
+                    value=f"```ini\n{pvp}\n```",
+                    inline=False)
+
+        kills_pve = "\n".join([
+            f"Scientists:  {fmt(st['kill_scientist'])}",
+            f"Bears     :  {fmt(st['kill_bear'])}",
+            f"Wolves    :  {fmt(st['kill_wolf'])}",
+            f"Boars     :  {fmt(st['kill_boar'])}",
+            f"Deer      :  {fmt(st['kill_deer'])}",
+            f"Horses    :  {fmt(st['kill_horse'])}",
+        ])
+        deaths_misc = "\n".join([
+            f"Suicides:  {fmt(st['death_suicide'])}",
+            f"Falling :  {fmt(st['death_fall'])}",
+        ])
+        e.add_field(name="PvE kills",
+                    value=f"```ini\n{kills_pve}\n```",
                     inline=True)
-        e.add_field(name="Last played",  value=last_play, inline=True)
-        e.add_field(name="Achievements",
-                    value=f"**{ach_unl}**/**{ach_tot}** ({ach_pct})",
+        e.add_field(name="Other deaths",
+                    value=f"```ini\n{deaths_misc}\n```",
                     inline=True)
+        e.add_field(name="\u200b", value="\u200b", inline=False)  # spacer
 
-        # presence row
-        e.add_field(
-            name="Presence",
-            value=(f"Steam : **{pres_steam}**\n"
-                f"BM    : **{bm_online}**\n"
-                f"BM sessions : **{fmt(bm_sessions)}**"),
-            inline=False
-        )
-
-        # PvP block
-        e.add_field(
-            name="PvP",
-            value=(f"Kills **{fmt(kills)}** / Deaths **{fmt(deaths)}** "
-                f"(K/D {kd})\n"
-                f"Bullets **{fmt(bullets_hit)}** / {fmt(bullets_fired)} "
-                f"({bullet_acc})\n"
-                f"Head-shot acc. {head_acc}"),
-            inline=False
-        )
-
-        # three columns: Kills | Bow | Deaths
-        e.add_field(
-            name="Kills",
-            value=(f"Scientists **{fmt(st['kill_scientist'])}**\n"
-                f"Bears **{fmt(st['kill_bear'])}**, "
-                f"Wolves **{fmt(st['kill_wolf'])}**\n"
-                f"Boars **{fmt(st['kill_boar'])}**, "
-                f"Deer **{fmt(st['kill_deer'])}**\n"
-                f"Horses **{fmt(st['kill_horse'])}**"),
-            inline=True
-        )
-        e.add_field(
-            name="Bow",
-            value=(f"Arrows **{fmt(arrows_hit)}** / {fmt(arrows_fired)}\n"
-                f"Accuracy {arrow_acc}"),
-            inline=True
-        )
-        e.add_field(
-            name="Deaths",
-            value=(f"Suicides **{fmt(st['death_suicide'])}**\n"
-                f"Falling **{fmt(st['death_fall'])}**"),
-            inline=True
-        )
-        e.add_field(name="\u200b", value="\u200b", inline=False)  # blank line
-
-        # resource & building groups (three columns)
-        e.add_field(
-            name="Resources (nodes)",
-            value=(f"Wood **{fmt(st['harvest_wood'])}**\n"
-                f"Stone **{fmt(st['harvest_stones'])}**\n"
-                f"Metal ore **{fmt(st['harvest_metal_ore'])}**\n"
-                f"HQ ore **{fmt(st['harvest_hq_metal_ore'])}**\n"
-                f"Sulfur ore **{fmt(st['harvest_sulfur_ore'])}**"),
-            inline=True
-        )
-        e.add_field(
-            name="Resources (pick-up)",
-            value=(f"Low-grade **{fmt(st['acq_lowgrade'])}**\n"
-                f"Scrap **{fmt(st['acq_scrap'])}**\n"
-                f"Cloth **{fmt(st['acq_cloth'])}**\n"
-                f"Leather **{fmt(st['acq_leather'])}**"),
-            inline=True
-        )
-        e.add_field(
-            name="Building / Loot",
-            value=(f"Blocks placed **{fmt(st['build_place'])}**\n"
-                f"Blocks upgraded **{fmt(st['build_upgrade'])}**\n"
-                f"Barrels broken **{fmt(st['barrels'])}**\n"
-                f"BPs learned **{fmt(st['bps'])}**"),
-            inline=True
-        )
+        nodes = "\n".join([
+            f"Wood      : {fmt(st['harvest_wood'])}",
+            f"Stone     : {fmt(st['harvest_stones'])}",
+            f"Metal ore : {fmt(st['harvest_metal_ore'])}",
+            f"HQ ore    : {fmt(st['harvest_hq_metal_ore'])}",
+            f"Sulfur ore: {fmt(st['harvest_sulfur_ore'])}",
+        ])
+        pickups = "\n".join([
+            f"Low-grade: {fmt(st['acq_lowgrade'])}",
+            f"Scrap    : {fmt(st['acq_scrap'])}",
+            f"Cloth    : {fmt(st['acq_cloth'])}",
+            f"Leather  : {fmt(st['acq_leather'])}",
+        ])
+        build_loot = "\n".join([
+            f"Blocks placed : {fmt(st['build_place'])}",
+            f"Blocks upgrade: {fmt(st['build_upgrade'])}",
+            f"Barrels broken: {fmt(st['barrels'])}",
+            f"BPs learned   : {fmt(st['bps'])}",
+        ])
+        e.add_field(name="Resources (nodes)",
+                    value=f"```ini\n{nodes}\n```",
+                    inline=True)
+        e.add_field(name="Resources (pick-ups)",
+                    value=f"```ini\n{pickups}\n```",
+                    inline=True)
+        e.add_field(name="Building / Loot",
+                    value=f"```ini\n{build_loot}\n```",
+                    inline=True)
         e.add_field(name="\u200b", value="\u200b", inline=False)
 
-        # Electric / Social  |  Horses  |  Consumption / UI
-        e.add_field(
-            name="Electric / Social",
-            value=(f"Wires conn. **{fmt(st['wires'])}**\n"
-                f"Pipes conn. **{fmt(st['pipes'])}**\n"
-                f"Friendly waves **{fmt(st['waves'])}**"),
-            inline=True
-        )
-        e.add_field(
-            name="Horses",
-            value=(f"Miles ridden **{fmt(st['horse_miles'])}**\n"
-                f"Horses ridden **{fmt(st['horses_ridden'])}**"),
-            inline=True
-        )
-        e.add_field(
-            name="Consumption / UI",
-            value=(f"Calories **{fmt(st['calories'])}**\n"
-                f"Water **{fmt(st['water'])}**\n"
-                f"Map opens **{fmt(st['map_open'])}**\n"
-                f"Inventory opens **{fmt(st['inv_open'])}**\n"
-                f"Items crafted **{fmt(st['items_crafted'])}**"),
-            inline=True
-        )
+        social = "\n".join([
+            f"Wires conn.: {fmt(st['wires'])}",
+            f"Pipes conn.: {fmt(st['pipes'])}",
+            f"Friendly waves: {fmt(st['waves'])}",
+        ])
+        horses = "\n".join([
+            f"Miles ridden : {fmt(st['horse_miles'])}",
+            f"Horses ridden: {fmt(st['horses_ridden'])}",
+        ])
+        consum = "\n".join([
+            f"Calories : {fmt(st['calories'])}",
+            f"Water    : {fmt(st['water'])}",
+            f"Map opens: {fmt(st['map_open'])}",
+            f"Inv opens: {fmt(st['inv_open'])}",
+            f"Crafted  : {fmt(st['items_crafted'])}",
+        ])
+        e.add_field(name="Electric / Social",
+                    value=f"```ini\n{social}\n```",
+                    inline=True)
+        e.add_field(name="Horses",
+                    value=f"```ini\n{horses}\n```",
+                    inline=True)
+        e.add_field(name="Consumption / UI",
+                    value=f"```ini\n{consum}\n```",
+                    inline=True)
 
         await inter.followup.send(embed=e, ephemeral=True)
 
