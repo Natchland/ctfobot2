@@ -122,7 +122,7 @@ class StatsCog(commands.Cog):
     async def check_help(self, inter: discord.Interaction):
         txt = "\n".join(f"{k} — {v}" for k, v in RISK_FLAG_EXPLANATIONS.items())
         await inter.response.send_message(txt, ephemeral=True)
-
+        
     # ────────────────────────────────
     #   /check player
     # ────────────────────────────────
@@ -139,10 +139,11 @@ class StatsCog(commands.Cog):
 
         sid = await self._resolve(steamid)
         if not sid:
-            return await inter.followup.send("Unable to resolve SteamID.",
-                                             ephemeral=True)
+            return await inter.followup.send(
+                "Unable to resolve SteamID.", ephemeral=True
+            )
 
-        # ───── cache ─────
+        # ───── pull from cache or fetch ─────
         if sid in PLAYER_CACHE:
             (bans, prof, lvl, game_cnt, friend_cnt, top_games,
              bm_prof, bm_bans, eac, names,
@@ -172,11 +173,16 @@ class StatsCog(commands.Cog):
                    if prof.get("timecreated") else None)
         age = (now - created).days if created else None
 
-        recent_ban  = bans["DaysSinceLastBan"] is not None \
-                      and bans["DaysSinceLastBan"] <= 90
-        very_recent = bans["DaysSinceLastBan"] is not None \
-                      and bans["DaysSinceLastBan"] <= 14
-        low_lvl     = lvl is not None and lvl < 10
+        # Any ban?
+        total_bans = (bans.get("NumberOfVACBans", 0) or 0) + \
+                     (bans.get("NumberOfGameBans", 0) or 0)
+        has_any_ban = bans.get("VACBanned") or total_bans
+
+        recent_ban  = has_any_ban and \
+                      bans.get("DaysSinceLastBan", 9999) <= 90
+        very_recent = has_any_ban and \
+                      bans.get("DaysSinceLastBan", 9999) <= 14
+        low_lvl     = lvl is not None and lvl < 6          # < 6  ≡ low
         low_games   = game_cnt is not None and game_cnt < 3
         rust_only   = (game_cnt is not None and game_cnt <= 2
                        and top_games and top_games[0]['name'].lower() == "rust")
@@ -184,30 +190,31 @@ class StatsCog(commands.Cog):
         private     = prof.get("communityvisibilitystate", 3) != 3
         default_av  = prof.get("avatarfull", "").endswith("/avatar.jpg")
         many_names  = len(names) >= 3
-        multi_bans  = (bans["NumberOfVACBans"] or 0) + (bans["NumberOfGameBans"] or 0) > 1
+        multi_bans  = total_bans > 1
         suspicious_name = bool(patterns)
         fast_rust = (rust_h is not None and age is not None
                      and rust_h > 100 and age < 30)
 
         flags: list[str] = []
-        if private:     flags.append("🔒 Private profile")
-        if default_av:  flags.append("👤 Default avatar")
+        if private:        flags.append("🔒 Private profile")
+        if default_av:     flags.append("👤 Default avatar")
         if age is not None and age < 30: flags.append("🆕 New account")
-        if low_lvl:     flags.append("⬇️ Low Steam level")
-        if low_games:   flags.append("🎮 Few games")
-        if low_friends: flags.append("👥 Few friends")
-        if very_recent: flags.append("⚠️ Very recent ban")
-        elif recent_ban:flags.append("⚠️ Recent ban")
-        if multi_bans:  flags.append("⚠️ Multiple bans")
-        if bm_bans:     flags.append("🔴 BattleMetrics ban")
-        if eac:         flags.append("🔴 EAC ban")
-        if rb_status:   flags.append("🔴 RustBans ban")
-        if sr_status:   flags.append("⚠️ SteamRep flagged")
-        if many_names:  flags.append("✏️ Frequent name changes")
-        if suspicious_name: flags.append("🕵️‍♂️ Suspicious name")
-        if rust_only:   flags.append("🕹️ Rust-only account")
-        if fast_rust:   flags.append("⏳ High Rust hours (fast)")
+        if low_lvl:        flags.append("⬇️ Low Steam level")
+        if low_games:      flags.append("🎮 Few games")
+        if low_friends:    flags.append("👥 Few friends")
+        if very_recent:    flags.append("⚠️ Very recent ban")
+        elif recent_ban:   flags.append("⚠️ Recent ban")
+        if multi_bans:     flags.append("⚠️ Multiple bans")
+        if bm_bans:        flags.append("🔴 BattleMetrics ban")
+        if eac:            flags.append("🔴 EAC ban")
+        if rb_status:      flags.append("🔴 RustBans ban")
+        if sr_status:      flags.append("⚠️ SteamRep flagged")
+        if many_names:     flags.append("✏️ Frequent name changes")
+        if suspicious_name:flags.append("🕵️‍♂️ Suspicious name")
+        if rust_only:      flags.append("🕹️ Rust-only account")
+        if fast_rust:      flags.append("⏳ High Rust hours (fast)")
 
+        # ───── numeric score ─────
         score = 0
         if private:             score += 2
         if default_av:          score += 1
@@ -233,11 +240,12 @@ class StatsCog(commands.Cog):
         score = max(score, 0)
 
         risk, colour = (
-            ("🔴 HIGH RISK", discord.Color.red())       if score >= 12 else
+            ("🔴 HIGH RISK", discord.Color.red())        if score >= 12 else
             ("🟠 MODERATE RISK", discord.Color.orange()) if score >= 5 else
             ("🟢 LOW RISK",     discord.Color.green())
         )
 
+        # ───── embed ─────
         e = (
             discord.Embed(
                 title=prof.get("personaname", "Unknown"),
@@ -257,19 +265,19 @@ class StatsCog(commands.Cog):
         e.add_field(name="Age",
                     value=f"{age} d" if age is not None else "N/A",
                     inline=True)
-        e.add_field(name="Level", value=fmt(lvl), inline=True)
-        e.add_field(name="Games", value=fmt(game_cnt), inline=True)
+        e.add_field(name="Level",   value=fmt(lvl),        inline=True)
+        e.add_field(name="Games",   value=fmt(game_cnt),   inline=True)
         e.add_field(name="Friends", value=fmt(friend_cnt), inline=True)
         e.add_field(name="Status",
                     value="Private" if private else "Public", inline=True)
-        e.add_field(name="Rust hrs",  value=fmt(rust_h), inline=True)
-        e.add_field(name="2-wks hrs", value=fmt(two_w_h), inline=True)
+        e.add_field(name="Rust hrs",  value=fmt(rust_h),   inline=True)
+        e.add_field(name="2-wks hrs", value=fmt(two_w_h),  inline=True)
 
         if top_games:
             e.add_field(
                 name="Top games",
                 value="\n".join(
-                    f"{g['name']} ({g['playtime']//60:,} h)"
+                    f"{g['name']} ({g['playtime']:,} h)"   # already in hours
                     for g in top_games[:5]
                 ),
                 inline=False
@@ -295,6 +303,7 @@ class StatsCog(commands.Cog):
             inline=True)
         e.add_field(name="Trade Ban",
                     value=bans["EconomyBan"].capitalize(), inline=True)
+
         if eac is not None:
             e.add_field(name="EAC Ban",
                         value=f"{badge(eac)} {'Yes' if eac else 'No'}",
