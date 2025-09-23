@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────
 #  ctfobot2.0.py   –  CTFO Discord bot / registration system
 # ──────────────────────────────────────────────────────────────────────
-import os, sys, asyncio, signal, json
+import os, sys, asyncio, signal, json, logging
 from datetime import datetime, timedelta, timezone, date
 from random import choice
 from typing import Dict, Any
@@ -11,6 +11,26 @@ import discord, asyncpg
 from discord import app_commands
 from discord.ext import commands, tasks
 from importlib import import_module
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    stream=sys.stdout,
+    force=True,                 # override other basicConfig calls
+)
+
+@tasks.loop(seconds=30)
+async def heartbeat():                            # ➋  the tiny loop
+    print("heartbeat – bot is still running", flush=True)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DB_URL    = os.getenv("DATABASE_URL")
+if not BOT_TOKEN or not DB_URL:
+    raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ══════════════════════════════════════════════════════════════════════
 #                             CONFIGURATION
@@ -870,57 +890,106 @@ class StaffApplicationModal(discord.ui.Modal):
 
 # ─────────────────── reviewer action buttons ───────────────────
 class StaffApplicationActionView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, applicant_id: int, role: str):
-        super().__init__(timeout=None)
-        self.guild, self.applicant_id, self.role = guild, applicant_id, role
+    """
+    Persistent action-view attached to each staff-application message.
+    Re-attached on bot restart via resume_staff_applications().
+    """
 
+    def __init__(self, guild: discord.Guild, applicant_id: int, role: str):
+        super().__init__(timeout=None)                       # persistent view
+        self.guild: discord.Guild = guild
+        self.applicant_id: int = applicant_id
+        self.role: str = role
+
+    # ------------------------------------------------------------------ #
+    # helpers                                                            #
+    # ------------------------------------------------------------------ #
     async def _authorised(self, member: discord.Member) -> bool:
-        return (member.guild_permissions.administrator
-                or any(r.id in STAFF_ROLE_IDS.values() for r in member.roles))
+        return (
+            member.guild_permissions.administrator
+            or any(r.id in STAFF_ROLE_IDS.values() for r in member.roles)
+        )
 
     async def _notify(self, txt: str):
         user = await safe_fetch(self.guild, self.applicant_id)
         if user:
-            try:    await user.send(txt)
-            except discord.Forbidden: pass
+            try:
+                await user.send(txt)
+            except discord.Forbidden:
+                pass
 
     async def _finish(self, inter: discord.Interaction, colour: discord.Colour):
         emb = inter.message.embeds[0]
         emb.colour = colour
-        for c in self.children: c.disabled = True
+        for c in self.children:
+            c.disabled = True
         await inter.message.edit(embed=emb, view=self)
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
+    # ------------------------------------------------------------------ #
+    # buttons                                                            #
+    # ------------------------------------------------------------------ #
+    @discord.ui.button(
+        label="Accept",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+        custom_id="staff_app_accept"               # <- required for persistence
+    )
     async def accept(self, inter: discord.Interaction, _):
         if not await self._authorised(inter.user):
-            return await inter.response.send_message("Not authorised.", ephemeral=True)
+            return await inter.response.send_message(
+                "Not authorised.", ephemeral=True
+            )
 
         applicant = await safe_fetch(self.guild, self.applicant_id)
         if not applicant:
-            return await inter.response.send_message("Applicant left.", ephemeral=True)
+            return await inter.response.send_message(
+                "Applicant left.", ephemeral=True
+            )
 
         role_obj = self.guild.get_role(STAFF_ROLE_IDS[self.role])
         if not role_obj:
-            return await inter.response.send_message("Role missing.", ephemeral=True)
+            return await inter.response.send_message(
+                "Role missing.", ephemeral=True
+            )
 
-        try:    await applicant.add_roles(role_obj, reason="Staff application accepted")
+        try:
+            await applicant.add_roles(
+                role_obj, reason="Staff application accepted"
+            )
         except discord.Forbidden:
-            return await inter.response.send_message("Cannot add role.", ephemeral=True)
+            return await inter.response.send_message(
+                "Cannot add role.", ephemeral=True
+            )
 
         await db.update_staff_app_status(inter.message.id, "accepted")
-        await inter.response.send_message(f"{applicant.mention} accepted ✅", ephemeral=True)
+        await inter.response.send_message(
+            f"{applicant.mention} accepted ✅", ephemeral=True
+        )
         await self._finish(inter, discord.Color.green())
-        await self._notify(f"🎉 You have been **accepted** as **{self.role}**!")
+        await self._notify(
+            f"🎉 You have been **accepted** as **{self.role}**!"
+        )
 
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔")
+    @discord.ui.button(
+        label="Deny",
+        style=discord.ButtonStyle.danger,
+        emoji="⛔",
+        custom_id="staff_app_deny"                 # <- required for persistence
+    )
     async def deny(self, inter: discord.Interaction, _):
         if not await self._authorised(inter.user):
-            return await inter.response.send_message("Not authorised.", ephemeral=True)
+            return await inter.response.send_message(
+                "Not authorised.", ephemeral=True
+            )
 
         await db.update_staff_app_status(inter.message.id, "denied")
-        await inter.response.send_message("Application denied ⛔", ephemeral=True)
+        await inter.response.send_message(
+            "Application denied ⛔", ephemeral=True
+        )
         await self._finish(inter, discord.Color.red())
-        await self._notify(f"❌ Your application for **{self.role}** was **denied**.")
+        await self._notify(
+            f"❌ Your application for **{self.role}** was **denied**."
+        )
 
 # ──────────────────────  slash command  ──────────────────────
 @bot.tree.command(name="staffapply", description="Apply for a staff position")
@@ -1634,11 +1703,11 @@ async def memberform(inter: discord.Interaction):
     )
 
 # ════════════════════════ on_ready & startup ══════════════════════════
+import traceback
 @bot.event
 async def on_ready():
     await db.connect()
-    await (import_module("cogs.giveaways").setup)(bot, db)
-    await (import_module("cogs.stats").setup)(bot, db)
+
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
     guild_obj = discord.Object(id=GUILD_ID)
@@ -1656,13 +1725,19 @@ async def on_ready():
     if not activity_maintenance.is_running():
         activity_maintenance.start()
 
+    if not heartbeat.is_running():
+        heartbeat.start()
+
     print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
 #  ENTRY POINTS  – safe for import OR direct execution
 # ══════════════════════════════════════════════════════════════════════
 async def _run_bot():
-    """Internal helper used by main()."""
+
+    await (import_module("cogs.giveaways").setup)(bot, db)
+    await (import_module("cogs.stats").setup)(bot, db)
+
     await bot.start(BOT_TOKEN)
 
 def main() -> None:
