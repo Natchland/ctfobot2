@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # ────────────────────────── stdlib & 3rd-party ──────────────────────────
 import os
+import json
 import re
 import datetime as dt
 import aiohttp
