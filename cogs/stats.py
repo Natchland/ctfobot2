@@ -122,7 +122,7 @@ class StatsCog(commands.Cog):
     async def check_help(self, inter: discord.Interaction):
         txt = "\n".join(f"{k} — {v}" for k, v in RISK_FLAG_EXPLANATIONS.items())
         await inter.response.send_message(txt, ephemeral=True)
-        
+
     # ────────────────────────────────
     #   /check player
     # ────────────────────────────────
@@ -137,13 +137,14 @@ class StatsCog(commands.Cog):
 
         await inter.response.defer(ephemeral=True)
 
+        # ───── SteamID resolution ─────
         sid = await self._resolve(steamid)
         if not sid:
             return await inter.followup.send(
                 "Unable to resolve SteamID.", ephemeral=True
             )
 
-        # ───── pull from cache or fetch ─────
+        # ───── fetch (with 5-min cache) ─────
         if sid in PLAYER_CACHE:
             (bans, prof, lvl, game_cnt, friend_cnt, top_games,
              bm_prof, bm_bans, eac, names,
@@ -167,187 +168,178 @@ class StatsCog(commands.Cog):
                                  sr_status, rust_h, two_w_h,
                                  comments, patterns)
 
-        # ───── risk analysis ─────
+        # ───── risk / flag analysis ─────
         now = dt.datetime.utcnow()
         created = (dt.datetime.utcfromtimestamp(prof.get("timecreated", 0))
                    if prof.get("timecreated") else None)
         age = (now - created).days if created else None
 
-        # Any ban?
-        total_bans = (bans.get("NumberOfVACBans", 0) or 0) + \
-                     (bans.get("NumberOfGameBans", 0) or 0)
-        has_any_ban = bans.get("VACBanned") or total_bans
+        total_bans   = (bans.get("NumberOfVACBans", 0) or 0) + \
+                       (bans.get("NumberOfGameBans", 0) or 0)
+        has_any_ban  = bans.get("VACBanned") or total_bans
 
-        recent_ban  = has_any_ban and \
-                      bans.get("DaysSinceLastBan", 9999) <= 90
-        very_recent = has_any_ban and \
-                      bans.get("DaysSinceLastBan", 9999) <= 14
-        low_lvl     = lvl is not None and lvl < 6          # < 6  ≡ low
-        low_games   = game_cnt is not None and game_cnt < 3
-        rust_only   = (game_cnt is not None and game_cnt <= 2
-                       and top_games and top_games[0]['name'].lower() == "rust")
-        low_friends = friend_cnt is not None and friend_cnt < 3
-        private     = prof.get("communityvisibilitystate", 3) != 3
-        default_av  = prof.get("avatarfull", "").endswith("/avatar.jpg")
-        many_names  = len(names) >= 3
-        multi_bans  = total_bans > 1
+        recent_ban   = has_any_ban and bans.get("DaysSinceLastBan", 9999) <= 90
+        very_recent  = has_any_ban and bans.get("DaysSinceLastBan", 9999) <= 14
+        low_lvl      = lvl is not None and lvl < 6
+        low_games    = game_cnt is not None and game_cnt < 3
+        rust_only    = (game_cnt is not None and game_cnt <= 2
+                        and top_games and top_games[0]["name"].lower() == "rust")
+        low_friends  = friend_cnt is not None and friend_cnt < 3
+        private      = prof.get("communityvisibilitystate", 3) != 3
+        default_av   = prof.get("avatarfull", "").endswith("/avatar.jpg")
+        many_names   = len(names) >= 3
+        multi_bans   = total_bans > 1
         suspicious_name = bool(patterns)
-        fast_rust = (rust_h is not None and age is not None
-                     and rust_h > 100 and age < 30)
+        fast_rust    = (rust_h is not None and age is not None
+                        and rust_h > 100 and age < 30)
 
         flags: list[str] = []
-        if private:        flags.append("🔒 Private profile")
-        if default_av:     flags.append("👤 Default avatar")
+        if private:         flags.append("🔒 Private profile")
+        if default_av:      flags.append("👤 Default avatar")
         if age is not None and age < 30: flags.append("🆕 New account")
-        if low_lvl:        flags.append("⬇️ Low Steam level")
-        if low_games:      flags.append("🎮 Few games")
-        if low_friends:    flags.append("👥 Few friends")
-        if very_recent:    flags.append("⚠️ Very recent ban")
-        elif recent_ban:   flags.append("⚠️ Recent ban")
-        if multi_bans:     flags.append("⚠️ Multiple bans")
-        if bm_bans:        flags.append("🔴 BattleMetrics ban")
-        if eac:            flags.append("🔴 EAC ban")
-        if rb_status:      flags.append("🔴 RustBans ban")
-        if sr_status:      flags.append("⚠️ SteamRep flagged")
-        if many_names:     flags.append("✏️ Frequent name changes")
-        if suspicious_name:flags.append("🕵️‍♂️ Suspicious name")
-        if rust_only:      flags.append("🕹️ Rust-only account")
-        if fast_rust:      flags.append("⏳ High Rust hours (fast)")
+        if low_lvl:         flags.append("⬇️ Low Steam level")
+        if low_games:       flags.append("🎮 Few games")
+        if low_friends:     flags.append("👥 Few friends")
+        if very_recent:     flags.append("⚠️ Very recent ban")
+        elif recent_ban:    flags.append("⚠️ Recent ban")
+        if multi_bans:      flags.append("⚠️ Multiple bans")
+        if bm_bans:         flags.append("🔴 BattleMetrics ban")
+        if eac:             flags.append("🔴 EAC ban")
+        if rb_status:       flags.append("🔴 RustBans ban")
+        if sr_status:       flags.append("⚠️ SteamRep flagged")
+        if many_names:      flags.append("✏️ Frequent name changes")
+        if suspicious_name: flags.append("🕵️‍♂️ Suspicious name")
+        if rust_only:       flags.append("🕹️ Rust-only account")
+        if fast_rust:       flags.append("⏳ High Rust hrs (fast)")
 
         # ───── numeric score ─────
         score = 0
-        if private:             score += 2
-        if default_av:          score += 1
+        if private:                        score += 2
+        if default_av:                     score += 1
         if age is not None:
             score += 5 if age < 7 else 3 if age < 30 else 0
-        if low_lvl:             score += 2
-        if lvl and lvl > 50:    score -= 2
-        if low_games:           score += 3
-        if game_cnt and game_cnt > 100: score -= 2
-        if low_friends:         score += 2
-        if friend_cnt and friend_cnt > 100: score -= 1
-        if very_recent:         score += 8
-        elif recent_ban:        score += 5
-        if multi_bans:          score += 3
-        if bm_bans:             score += 5
-        if eac:                 score += 5
-        if rb_status:           score += 5
-        if sr_status:           score += 5
-        if many_names:          score += 1
-        if suspicious_name:     score += 2
-        if rust_only:           score += 2
-        if fast_rust:           score += 2
+        if low_lvl:                        score += 2
+        if lvl and lvl > 50:               score -= 2
+        if low_games:                      score += 3
+        if game_cnt and game_cnt > 100:    score -= 2
+        if low_friends:                    score += 2
+        if friend_cnt and friend_cnt > 100:score -= 1
+        if very_recent:                    score += 8
+        elif recent_ban:                   score += 5
+        if multi_bans:                     score += 3
+        if bm_bans:                        score += 5
+        if eac:                            score += 5
+        if rb_status:                      score += 5
+        if sr_status:                      score += 5
+        if many_names:                     score += 1
+        if suspicious_name:                score += 2
+        if rust_only:                      score += 2
+        if fast_rust:                      score += 2
         score = max(score, 0)
 
         risk, colour = (
-            ("🔴 HIGH RISK", discord.Color.red())        if score >= 12 else
-            ("🟠 MODERATE RISK", discord.Color.orange()) if score >= 5 else
-            ("🟢 LOW RISK",     discord.Color.green())
+            ("🔴  HIGH RISK",     discord.Color.red())     if score >= 12 else
+            ("🟠  MODERATE RISK", discord.Color.orange())  if score >= 5  else
+            ("🟢  LOW RISK",      discord.Color.green())
         )
 
-        # ───── embed ─────
-        e = (
-            discord.Embed(
+        # ───── embed skeleton ─────
+        e = discord.Embed(
                 title=prof.get("personaname", "Unknown"),
                 url=prof.get("profileurl"),
                 colour=colour,
                 description=f"{risk}\n\n{' '.join(flags) or 'No immediate risk factors.'}"
-            )
-            .set_footer(text=f"SteamID64: {sid} | Score: {score}")
-        )
+            ).set_footer(text=f"SteamID64: {sid}  |  Score: {score}")
         if prof.get("avatarfull"):
             e.set_thumbnail(url=prof["avatarfull"])
 
         fmt = lambda n: f"{n:,}" if n is not None else "N/A"
-        e.add_field(name="Created",
-                    value=created.strftime("%Y-%m-%d") if created else "N/A",
-                    inline=True)
-        e.add_field(name="Age",
-                    value=f"{age} d" if age is not None else "N/A",
-                    inline=True)
-        e.add_field(name="Level",   value=fmt(lvl),        inline=True)
-        e.add_field(name="Games",   value=fmt(game_cnt),   inline=True)
-        e.add_field(name="Friends", value=fmt(friend_cnt), inline=True)
-        e.add_field(name="Status",
-                    value="Private" if private else "Public", inline=True)
-        e.add_field(name="Rust hrs",  value=fmt(rust_h),   inline=True)
-        e.add_field(name="2-wks hrs", value=fmt(two_w_h),  inline=True)
 
+        # ───── neat blocks ─────
+        # Account block
+        account_block = "\n".join([
+            f"Created : {created.strftime('%Y-%m-%d') if created else 'N/A'}",
+            f"Age     : {age} d" if age is not None else "Age     : N/A",
+            f"Level   : {fmt(lvl)}",
+            f"Games   : {fmt(game_cnt)}",
+            ("Friends : " +
+             ("Private" if friend_cnt is None else fmt(friend_cnt))),
+            f"Status  : {'Private' if private else 'Public'}",
+        ])
+        e.add_field(name="Account", value=f"```ini\n{account_block}\n```",
+                    inline=False)
+
+        # Activity block
+        activity_block = "\n".join([
+            f"Rust hours  : {fmt(rust_h)}",
+            f"2-weeks hrs : {fmt(two_w_h)}",
+        ])
+        e.add_field(name="Activity", value=f"```ini\n{activity_block}\n```",
+                    inline=False)
+
+        # Top games (already hours)
         if top_games:
-            e.add_field(
-                name="Top games",
-                value="\n".join(
-                    f"{g['name']} ({g['playtime']:,} h)"   # already in hours
-                    for g in top_games[:5]
-                ),
-                inline=False
+            tg_list = "\n".join(
+                f"{g['name'][:25]:25}  {g['playtime']:>6,} h"
+                for g in top_games[:5]
             )
+            e.add_field(name="Top games (hours)",
+                        value=f"```ini\n{tg_list}\n```",
+                        inline=False)
 
-        badge = lambda v: "🔴" if v else "🟢"
-        e.add_field(
-            name="VAC Ban",
-            value=(f"{badge(bans['VACBanned'])} {bans['NumberOfVACBans']} "
-                   f"({bans['DaysSinceLastBan']} d ago)"
-                   if bans['VACBanned'] else "🟢 None"),
-            inline=True)
-        e.add_field(
-            name="Game Bans",
-            value=(f"{badge(bans['NumberOfGameBans'])} "
-                   f"{bans['NumberOfGameBans']}"
-                   if bans['NumberOfGameBans'] else "🟢 None"),
-            inline=True)
-        e.add_field(
-            name="Comm. Ban",
-            value=f"{badge(bans['CommunityBanned'])} "
-                  f"{'Yes' if bans['CommunityBanned'] else 'No'}",
-            inline=True)
-        e.add_field(name="Trade Ban",
-                    value=bans["EconomyBan"].capitalize(), inline=True)
-
+        # Bans / reputation
+        ban_lines = [
+            f"VAC             : {'Yes' if bans['VACBanned'] else 'No'} "
+            f"({bans['NumberOfVACBans']})",
+            f"Game bans       : {bans['NumberOfGameBans']}",
+            f"Comm ban        : {'Yes' if bans['CommunityBanned'] else 'No'}",
+            f"Trade ban       : {bans['EconomyBan'].capitalize()}",
+        ]
         if eac is not None:
-            e.add_field(name="EAC Ban",
-                        value=f"{badge(eac)} {'Yes' if eac else 'No'}",
-                        inline=True)
+            ban_lines.append(f"EAC ban         : {'Yes' if eac else 'No'}")
+        ban_lines.append(
+            f"BattleMetrics   : "
+            f"{len(bm_bans)} ban(s)" if bm_bans else "BattleMetrics   : None")
+        ban_lines.append(
+            f"RustBans        : {rb_status or 'None'}")
+        ban_lines.append(
+            f"SteamRep        : {sr_status or 'Clean'}")
+        e.add_field(name="Bans / reputation",
+                    value=f"```ini\n" + "\n".join(ban_lines) + "\n```",
+                    inline=False)
 
+        # BattleMetrics details (if any bans) – separate block to avoid clutter
         if bm_prof:
             bm_url = f"https://www.battlemetrics.com/rcon/players/{bm_prof['id']}"
-            txt = f"[Profile]({bm_url})"
             if bm_bans:
+                bm_text = f"[Profile]({bm_url}) — **{len(bm_bans)} ban(s)**\n"
                 for b in bm_bans[:3]:
-                    org    = (b["attributes"].get("organization", {})
-                              .get("name") or "Org")
-                    reason = b["attributes"].get("reason") or "No reason"
-                    date   = (b["attributes"].get("timestamp") or "")[:10]
-                    txt += f"\n🔴 {org}: {reason} ({date})"
+                    org    = (b['attributes'].get('organization', {})
+                              .get('name') or 'Org')
+                    reason = b['attributes'].get('reason') or 'No reason'
+                    date   = (b['attributes'].get('timestamp') or '')[:10]
+                    bm_text += f"• {org}: {reason} ({date})\n"
                 if len(bm_bans) > 3:
-                    txt += f"\n…and {len(bm_bans)-3} more"
+                    bm_text += f"…and {len(bm_bans)-3} more"
             else:
-                txt += "\n🟢 No BM bans"
-            e.add_field(name="BattleMetrics", value=txt, inline=False)
+                bm_text = f"[Profile]({bm_url}) — no bans"
+            e.add_field(name="BattleMetrics details", value=bm_text, inline=False)
 
-        if rb_status:
-            e.add_field(
-                name="RustBans",
-                value=f"🔴 {rb_status}: {rb_reason or 'No reason'} ({rb_date})",
-                inline=True)
-        else:
-            e.add_field(name="RustBans", value="🟢 None", inline=True)
-
-        if sr_status:
-            e.add_field(name="SteamRep", value=f"⚠️ {sr_status}", inline=True)
-        else:
-            e.add_field(name="SteamRep", value="🟢 Clean", inline=True)
-
+        # Previous names / comments
         if names:
-            e.add_field(name="Prev. names",
+            e.add_field(name="Previous names",
                         value="\n".join(names[:10]), inline=False)
-        if patterns:
-            e.add_field(name="Suspicious patterns",
-                        value="\n".join(patterns[:5]), inline=False)
         if comments:
             e.add_field(name="Profile comments",
                         value="\n".join(comments[:5]), inline=False)
 
+        # Glossary (only for flags present)
+        if flags:
+            glossary = "\n".join(f"{f} — {RISK_FLAG_EXPLANATIONS[f]}"
+                                 for f in flags)
+            e.add_field(name="Flag glossary", value=glossary, inline=False)
+
+        # Links
         links = [
             f"[Steam]({prof.get('profileurl')})",
             (f"[BattleMetrics](https://www.battlemetrics.com/rcon/players/"
@@ -357,13 +349,8 @@ class StatsCog(commands.Cog):
             f"[SteamRep](https://steamrep.com/profiles/{sid})",
         ]
         e.add_field(name="Links",
-                    value=" | ".join(l for l in links if l), inline=False)
-
-        if flags:
-            glossary = "\n".join(
-                f"{f} — {RISK_FLAG_EXPLANATIONS[f]}" for f in flags
-            )
-            e.add_field(name="Flag glossary", value=glossary, inline=False)
+                    value=" | ".join(l for l in links if l),
+                    inline=False)
 
         await inter.followup.send(embed=e, ephemeral=True)
 
