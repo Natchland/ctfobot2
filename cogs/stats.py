@@ -355,21 +355,27 @@ class StatsCog(commands.Cog):
 
         await inter.followup.send(embed=e, ephemeral=True)
 
-    # debug / helper – dump the raw dict in DM so you can save it locally
-    @app_commands.command(name="dump_rust_raw", description="DM-dump raw stats")
+    # ────────────────────────────────
+    #   /dump raw stats
+    # ────────────────────────────────
+    @app_commands.command(name="dump_rust_raw", description="DM-dump raw stats with hours")
     @app_commands.describe(steamid="SteamID64 or profile URL")
     async def dump_rust_raw(self, inter: discord.Interaction, steamid: str):
         await inter.response.defer(ephemeral=True)
         sid = await self._resolve(steamid)
         if not sid:
-            return await inter.followup.send("SteamID could not be resolved.",
-                                             ephemeral=True)
+            return await inter.followup.send("SteamID could not be resolved.", ephemeral=True)
         ok, raw = await self._rust_stats(sid)
         if not ok:
-            return await inter.followup.send("Stats private / unavailable.",
-                                             ephemeral=True)
+            return await inter.followup.send("Stats private / unavailable.", ephemeral=True)
+        # Fetch total Rust hours (lifetime)
+        tot_h, *_ = await self._rust_hours(sid)
+        if tot_h is not None:
+            raw["_hours"] = tot_h
         await inter.followup.send(
-            f"```json\n{json.dumps(raw, indent=2)}```", ephemeral=True
+            "Copy & save this JSON for baseline analysis:\n"
+            f"```json\n{json.dumps(raw, indent=2)}```",
+            ephemeral=True
         )
 
     # ────────────────────────────────
