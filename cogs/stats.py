@@ -354,6 +354,23 @@ class StatsCog(commands.Cog):
 
         await inter.followup.send(embed=e, ephemeral=True)
 
+    # debug / helper – dump the raw dict in DM so you can save it locally
+    @app_commands.command(name="dump_rust_raw", description="DM-dump raw stats")
+    @app_commands.describe(steamid="SteamID64 or profile URL")
+    async def dump_rust_raw(self, inter: discord.Interaction, steamid: str):
+        await inter.response.defer(ephemeral=True)
+        sid = await self._resolve(steamid)
+        if not sid:
+            return await inter.followup.send("SteamID could not be resolved.",
+                                             ephemeral=True)
+        ok, raw = await self._rust_stats(sid)
+        if not ok:
+            return await inter.followup.send("Stats private / unavailable.",
+                                             ephemeral=True)
+        await inter.followup.send(
+            f"```json\n{json.dumps(raw, indent=2)}```", ephemeral=True
+        )
+
     # ────────────────────────────────
     #   /stats rust
     # ────────────────────────────────
