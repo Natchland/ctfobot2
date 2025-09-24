@@ -632,7 +632,7 @@ async def activity_maintenance() -> None:
             if warn_ch:
                 await warn_ch.send(
                     f"{member.mention} You’ve been inactive for {days_idle} days — "
-                    "please pop in or you’ll lose your role."
+                    "please pop in or you’ll lose your active member role."
                 )
             await db.set_activity(uid, rec["streak"], rec["date"], True, rec["last"])
             warned_n += 1
