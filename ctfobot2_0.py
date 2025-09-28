@@ -19,9 +19,6 @@ logging.basicConfig(
     force=True,                 # override other basicConfig calls
 )
 
-@tasks.loop(seconds=30)
-async def heartbeat():                            # ➋  the tiny loop
-    print("heartbeat – bot is still running", flush=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL    = os.getenv("DATABASE_URL")
@@ -1725,9 +1722,6 @@ async def on_ready():
     if not activity_maintenance.is_running():
         activity_maintenance.start()
 
-    if not heartbeat.is_running():
-        heartbeat.start()
-
     print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1737,6 +1731,7 @@ async def _run_bot():
 
     await (import_module("cogs.giveaways").setup)(bot, db)
     await (import_module("cogs.stats").setup)(bot, db)
+    await (import_module("cogs.recruit_reminder").setup)(bot, db)
 
     await bot.start(BOT_TOKEN)
 
