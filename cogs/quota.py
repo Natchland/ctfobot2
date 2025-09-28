@@ -26,7 +26,7 @@ RESOURCES            = ["wood", "stone", "metal", "sulfur"]
 PROGRESS_BAR_LEN     = 25
 TASK_TOP_LIMIT       = 5
 GLOBAL_LB_SIZE       = 15
-LB_REFRESH_SECONDS   = 15          # how often the global LB embed refreshes
+LB_REFRESH_SECONDS   = 15          # refresh cadence for global LB
 QUOTA_IMAGE_DIR      = "/data/quota_images"
 
 # ─────────────────────── SQL ───────────────────────
@@ -84,10 +84,18 @@ ORDER BY user_id
 """
 
 MARK_MANY_SQL     = "UPDATE quota_submissions SET reviewed=TRUE WHERE id = ANY($1::INT[])"
-GLOBAL_LB_SQL     = """SELECT user_id,SUM(amount) total
-                       FROM quota_submissions
-                       WHERE reviewed=TRUE AND week_ts=CURRENT_DATE
-                       GROUP BY user_id ORDER BY total DESC LIMIT $1"""
+# per-user, per-resource totals + grand total
+GLOBAL_LB_SQL     = f"""
+SELECT user_id,
+       SUM(amount)                                            AS total,
+       {', '.join([f"SUM(CASE WHEN resource='{r}' THEN amount ELSE 0 END) AS {r}"
+                    for r in RESOURCES])}
+FROM quota_submissions
+WHERE reviewed=TRUE AND week_ts=CURRENT_DATE
+GROUP BY user_id
+ORDER BY total DESC
+LIMIT $1
+"""
 RESOURCE_TOT_SQL  = """SELECT resource,SUM(amount) total
                        FROM quota_submissions
                        WHERE reviewed=TRUE AND week_ts=CURRENT_DATE
@@ -184,7 +192,7 @@ class QuotaCog(commands.Cog):
             return "—"
         pct     = max(0.0, min(1.0, have / need))
         filled  = round(pct * length)
-        return f"{'▰' * filled}{'▱' * (length - filled)}  {pct*100:5.1f}%"
+        return f"{'▰'*filled}{'▱'*(length-filled)}  {pct*100:5.1f}%"
 
     async def _notify_staff(self, member, pairs, images, ids):
         ch = self.bot.get_channel(QUOTA_REVIEW_CH_ID)
@@ -198,26 +206,27 @@ class QuotaCog(commands.Cog):
 
     # ─────────── REFRESH WRAPPERS ───────────
     async def refresh_everything(self):
-        await self._table_ready.wait()
         await self.refresh_all_tasks()
         await self.refresh_weekly_leaderboard()
 
     # ─────────── TASK EMBEDS ───────────
     async def refresh_all_tasks(self):
+        await self._table_ready.wait()
         async with self.db.pool.acquire() as conn:
-            for t in await conn.fetch("SELECT * FROM quota_tasks WHERE completed=FALSE"):
+            rows = await conn.fetch("SELECT * FROM quota_tasks WHERE completed=FALSE")
+            for t in rows:
                 await self._refresh_task_embed(conn, t)
 
     async def _refresh_task_embed(self, conn, task):
         task_id, start = task["id"], task["start_sub"]
         needs = await conn.fetch("SELECT resource,required FROM quota_task_needs WHERE task_id=$1", task_id)
-        prog  = {n["resource"]: 0 for n in needs}
+        prog = {n["resource"]: 0 for n in needs}
         for n in needs:
             prog[n["resource"]] = await conn.fetchval(
                 "SELECT COALESCE(SUM(amount),0) FROM quota_submissions "
                 "WHERE reviewed=TRUE AND resource=$1 AND id>$2", n["resource"], start) or 0
-
         completed = all(prog[r] >= n["required"] for r, n in ((n["resource"], n) for n in needs))
+
         lb = await conn.fetch(
             "SELECT user_id,SUM(amount) total FROM quota_submissions "
             "WHERE reviewed=TRUE AND id>$1 GROUP BY user_id ORDER BY total DESC LIMIT $2",
@@ -230,12 +239,12 @@ class QuotaCog(commands.Cog):
         tot_need = sum(n["required"] for n in needs)
         tot_have = sum(min(prog[n["resource"]], n["required"]) for n in needs)
         embed.description = f"**Overall Progress**\n`{tot_have:,}` / `{tot_need:,}`\n{self._bar(tot_have, tot_need)}"
-
         embed.clear_fields()
         for n in needs:
-            r = n["resource"]; need = n["required"]; have = min(prog[r], need)
+            res, need = n["resource"], n["required"]
+            have = min(prog[res], need)
             embed.add_field(
-                name=r.title(),
+                name=res.title(),
                 value=f"`{have:,}` / `{need:,}`\n{self._bar(have, need)}",
                 inline=False)
 
@@ -247,15 +256,14 @@ class QuotaCog(commands.Cog):
         ch = self.bot.get_channel(PUBLIC_QUOTA_CH_ID)
         if ch:
             try:
-                m = await ch.fetch_message(task["message_id"])
-                await m.edit(embed=embed)
+                msg = await ch.fetch_message(task["message_id"])
+                await msg.edit(embed=embed)
             except discord.NotFound:
                 pass
-
         if completed and not task["completed"]:
             await conn.execute("UPDATE quota_tasks SET completed=TRUE WHERE id=$1", task_id)
 
-    # ─────────── WEEKLY LEADERBOARD EMBED ───────────
+    # ─────────── WEEKLY LEADERBOARD ───────────
     async def refresh_weekly_leaderboard(self):
         await self._table_ready.wait()
         async with self.db.pool.acquire() as conn:
@@ -263,7 +271,7 @@ class QuotaCog(commands.Cog):
             if not ch:
                 return
 
-            # ensure a message exists
+            # ensure message
             row = await conn.fetchrow("SELECT message_id FROM quota_weekly_lb LIMIT 1")
             msg: Optional[discord.Message] = None
             if row:
@@ -272,46 +280,65 @@ class QuotaCog(commands.Cog):
                 except discord.NotFound:
                     msg = None
 
-            # per-resource totals & default quotas
+            # resource totals for progress bars
             quotas = {r["resource"]: r["weekly"] for r in await conn.fetch("SELECT * FROM default_quotas")}
             totals = {r["resource"]: r["total"] for r in await conn.fetch(RESOURCE_TOT_SQL)}
 
             embed = discord.Embed(title="Weekly Leaderboard", colour=discord.Color.purple())
             for res in RESOURCES:
                 have = totals.get(res, 0)
-                need = quotas.get(res, max(have, 1))  # fallback so bar renders
+                need = quotas.get(res, max(have, 1))
                 embed.add_field(
                     name=res.title(),
                     value=f"`{have:,}` / `{need:,}`\n{self._bar(have, need)}",
                     inline=False)
 
-            # top contributors
+            # fetch per-user totals
             users = await conn.fetch(GLOBAL_LB_SQL, GLOBAL_LB_SIZE)
             if users:
-                body = "\n".join(
-                    f"**#{i}** <@{u['user_id']}> `{u['total']:,}`"
-                    for i, u in enumerate(users, start=1))
-                embed.add_field(name="Top 15 Contributors", value=body, inline=False)
+                header = "`Wood  Stone  Metal  Sulfur  Total`"
+                lines  = []
+                for i, u in enumerate(users, start=1):
+                    line = (f"**#{i}** <@{u['user_id']}>  "
+                            f"`{u['wood']:,}`  `{u['stone']:,}`  `{u['metal']:,}`  "
+                            f"`{u['sulfur']:,}`  `{u['total']:,}`")
+                    lines.append(line)
+                embed.add_field(name="Top 15 Contributors", value=f"{header}\n" + "\n".join(lines), inline=False)
             else:
                 embed.add_field(name="Top 15 Contributors", value="No reviewed submissions yet.", inline=False)
 
             if msg:
                 await msg.edit(embed=embed)
             else:
-                new_msg = await ch.send(embed=embed)
-                await conn.execute("INSERT INTO quota_weekly_lb (message_id) VALUES ($1)", new_msg.id)
+                new = await ch.send(embed=embed)
+                await conn.execute("INSERT INTO quota_weekly_lb (message_id) VALUES ($1)", new.id)
 
-    # ─────────── SLASH GROUP ───────────
+    # ─────────── BACKGROUND TASKS ───────────
+    @tasks.loop(seconds=LB_REFRESH_SECONDS)
+    async def lb_refresher(self):
+        await self.refresh_weekly_leaderboard()
+
+    @tasks.loop(hours=1)
+    async def weekly_cleanup(self):
+        await self._table_ready.wait()
+        now = datetime.now(timezone.utc)
+        if now.weekday() == 6 and now.hour == 0:
+            await self.db.pool.execute(PURGE_OLD_SQL)
+
+    async def cog_unload(self):
+        self.lb_refresher.cancel()
+        self.weekly_cleanup.cancel()
+
+    # ───────────  SLASH GROUP  ───────────
     quota = app_commands.Group(name="quota", description="Quota commands")
 
-    # ----- SUBMIT (everyone) -----
+    # ----------------  SUBMIT (everyone)  ----------------
     @quota.command(name="submit", description="Submit up to 10 screenshots")
     @app_commands.choices(resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES])
     @app_commands.describe(
         image1="Screenshot 1", image2="Screenshot 2", image3="Screenshot 3",
         image4="Screenshot 4", image5="Screenshot 5", image6="Screenshot 6",
-        image7="Screenshot 7", image8="Screenshot 8", image9="Screenshot 9",
-        image10="Screenshot 10"
+        image7="Screenshot 7", image8="Screenshot 8", image9="Screenshot 9", image10="Screenshot 10"
     )
     async def submit(
         self, inter: discord.Interaction,
@@ -324,14 +351,11 @@ class QuotaCog(commands.Cog):
         image9: Optional[discord.Attachment] = None, image10: Optional[discord.Attachment] = None
     ):
         await self._table_ready.wait()
-
         imgs = [i for i in (image1, image2, image3, image4, image5,
                             image6, image7, image8, image9, image10) if i][:10]
         if not imgs:
             return await inter.response.send_message("Attach at least one image.", ephemeral=True)
-
         await self._save_images(imgs, resource.value, inter.user.id)
-
         ids: List[int] = []
         async with self.db.pool.acquire() as conn:
             for img in imgs:
@@ -340,11 +364,10 @@ class QuotaCog(commands.Cog):
                     "VALUES ($1,$2,$3,$4) RETURNING id",
                     inter.user.id, resource.value, amount, img.url)
                 ids.append(rec_id)
-
         await inter.response.send_message("Submission received.", ephemeral=True)
         await self._notify_staff(inter.user, {resource.value: amount}, imgs, ids)
 
-    # ----- PERSONAL LB (everyone) -----
+    # ----------------  PERSONAL LB (everyone)  ----------------
     @quota.command(name="leaderboard", description="Per-resource weekly leaderboard")
     @app_commands.choices(resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES])
     async def leaderboard(self, inter: discord.Interaction, resource: app_commands.Choice[str]):
@@ -364,31 +387,28 @@ class QuotaCog(commands.Cog):
     leader_perm = role_check(GROUP_LEADER_ROLE_ID, PLAYER_MGMT_ROLE_ID, ADMIN_ROLE_ID)
     admin_perm  = role_check(ADMIN_ROLE_ID)
 
-    # ----- TASK -----
+    # ----------------  TASK  ----------------
     @quota.command(name="task", description="Create a multi-resource task")
     @leader_perm
     @app_commands.describe(name="Task name", details="Pairs e.g. stone 20000 sulfur 5k")
     async def task_create(self, inter: discord.Interaction, name: str, details: str):
         await self._table_ready.wait()
-
-        tokens = re.sub(r"[,;:]", " ", details.lower()).split()
+        toks = re.sub(r"[,;:]", " ", details.lower()).split()
         pairs: Dict[str, int] = {}
         cur: Optional[str] = None
-        for t in tokens:
-            if t in RESOURCES:
-                cur = t
-            elif t.replace(",", "").replace("k", "").isdigit() and cur:
-                amt = int(float(t.replace(",", "").replace("k", "")) * (1000 if "k" in t else 1))
+        for tok in toks:
+            if tok in RESOURCES:
+                cur = tok
+            elif tok.replace(",", "").replace("k", "").isdigit() and cur:
+                amt = int(float(tok.replace(",", "").replace("k", "")) * (1000 if "k" in tok else 1))
                 pairs[cur] = pairs.get(cur, 0) + amt
                 cur = None
         if not pairs:
             return await inter.response.send_message("No valid pairs.", ephemeral=True)
 
         embed = discord.Embed(title=f"Task: {name}", colour=discord.Color.blue())
-        for r, need in pairs.items():
-            embed.add_field(name=r.title(),
-                            value=f"`0` / `{need:,}`\n{self._bar(0, need)}",
-                            inline=False)
+        for res, need in pairs.items():
+            embed.add_field(name=res.title(), value=f"`0` / `{need:,}`\n{self._bar(0, need)}", inline=False)
 
         ch = self.bot.get_channel(PUBLIC_QUOTA_CH_ID)
         if not ch:
@@ -404,11 +424,10 @@ class QuotaCog(commands.Cog):
                 await conn.execute(
                     "INSERT INTO quota_task_needs (task_id,resource,required) VALUES ($1,$2,$3)",
                     task_id, res, need)
-
         await inter.response.send_message("Task created.", ephemeral=True)
         await self.refresh_everything()
 
-    # ----- REVIEW -----
+    # ----------------  REVIEW  ----------------
     @quota.command(name="review", description="Review pending submissions")
     @leader_perm
     async def review(self, inter: discord.Interaction):
@@ -420,11 +439,9 @@ class QuotaCog(commands.Cog):
         for r in rows:
             body = "\n".join(f"• **{k}** `{v}`" for k, v in r["res_totals"].items())
             embed.add_field(name=f"<@{r['user_id']}>", value=body, inline=False)
-        await inter.response.send_message(embed=embed,
-                                          view=QuotaCog.ReviewUsersView(rows, self),
-                                          ephemeral=True)
+        await inter.response.send_message(embed=embed, view=QuotaCog.ReviewUsersView(rows, self), ephemeral=True)
 
-    # ----- SETDEFAULT -----
+    # ----------------  SETDEFAULT  ----------------
     @quota.command(name="setdefault", description="Set global weekly quota")
     @leader_perm
     @app_commands.choices(resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES])
@@ -436,7 +453,7 @@ class QuotaCog(commands.Cog):
         await inter.response.send_message("Global quota set.", ephemeral=True)
         await self.refresh_weekly_leaderboard()
 
-    # ----- SET -----
+    # ----------------  SET  ----------------
     @quota.command(name="set", description="Set member weekly quota")
     @leader_perm
     @app_commands.choices(resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES])
@@ -448,7 +465,7 @@ class QuotaCog(commands.Cog):
         await self.db.pool.execute(SET_USER_SQL, member.id, resource.value, amount)
         await inter.response.send_message("Member quota set.", ephemeral=True)
 
-    # ----- RESET -----
+    # ----------------  RESET  ----------------
     @quota.command(name="reset", description="Wipe ALL quota data (button confirm)")
     @admin_perm
     async def reset(self, inter: discord.Interaction):
@@ -475,7 +492,7 @@ class QuotaCog(commands.Cog):
             await conn.execute("TRUNCATE quota_weekly_lb RESTART IDENTITY")
         await self.refresh_everything()
 
-    # ─────────── LISTENER ───────────
+    # ----------------  DM LISTENER  ----------------
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
         if msg.guild or msg.author.bot or not msg.attachments:
@@ -510,22 +527,6 @@ class QuotaCog(commands.Cog):
                     ids.append(rid)
         await msg.channel.send("Submission received – thank you!")
         await self._notify_staff(member, pairs, imgs, ids)
-
-    # ─────────── BACKGROUND TASKS ───────────
-    @tasks.loop(hours=1)
-    async def weekly_cleanup(self):
-        await self._table_ready.wait()
-        now = datetime.now(timezone.utc)
-        if now.weekday() == 6 and now.hour == 0:   # Sunday 00:00 UTC
-            await self.db.pool.execute(PURGE_OLD_SQL)
-
-    @tasks.loop(seconds=LB_REFRESH_SECONDS)
-    async def lb_refresher(self):
-        await self.refresh_weekly_leaderboard()
-
-    async def cog_unload(self):
-        self.weekly_cleanup.cancel()
-        self.lb_refresher.cancel()
 
 # ─────────── setup ───────────
 async def setup(bot, db):
