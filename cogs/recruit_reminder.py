@@ -151,7 +151,8 @@ class RecruitReminder(commands.Cog):
         # 1️⃣  no message stored → create prompt
         if state["message_id"] is None:
             msg = await channel.send(
-                f"<@&{RECRUITMENT_ROLE_ID}> Click **Accept** below.",
+                f"<@&{RECRUITMENT_ROLE_ID}> "
+                "Click **Accept** below if you’re available to send out recruitment posts!",
                 view=self.AcceptView(self)
             )
             await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
@@ -168,7 +169,10 @@ class RecruitReminder(commands.Cog):
         if state["end_ts"]:
             if now_ts >= state["end_ts"]:           # expired → reset
                 await msg.edit(
-                    content=f"<@&{RECRUITMENT_ROLE_ID}> Click **Accept** below.",
+                    content=(
+                        f"<@&{RECRUITMENT_ROLE_ID}> "
+                        "Click **Accept** below if you’re available to send out recruitment posts!"
+                    ),
                     view=self.AcceptView(self)
                 )
                 await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
