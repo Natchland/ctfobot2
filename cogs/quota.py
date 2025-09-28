@@ -1,197 +1,297 @@
 # cogs/quota.py
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+import asyncio, os, re, time, uuid
+from collections import defaultdict
+from datetime import datetime, timezone
 
-import asyncpg
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 # ───────────────────────── CONFIG ──────────────────────────
-FARMER_ROLE_ID  = 1379918816871448686      # only these members have quotas
-LEADERBOARD_SIZE = 10                      # /quota leaderboard top-N
+FARMER_ROLE_ID     = 1379918816871448686        # members with this role have quotas
+QUOTA_REVIEW_CH_ID = 1421920458437169254        # ← staff-only review channel
+RESOURCES          = ["stone", "sulfur", "metal", "wood"]
+LEADERBOARD_SIZE   = 10
+QUOTA_IMAGE_DIR    = "./data/quota_images"      # local folder for saved screenshots
 
 # ───────────────────────── SQL ─────────────────────────────
 CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS quotas (
-    user_id BIGINT PRIMARY KEY,
-    weekly  INTEGER NOT NULL DEFAULT 0          -- target amount
+CREATE TABLE IF NOT EXISTS default_quotas (
+    resource TEXT PRIMARY KEY,
+    weekly   INTEGER NOT NULL
 );
-
+CREATE TABLE IF NOT EXISTS quotas (
+    user_id  BIGINT,
+    resource TEXT,
+    weekly   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, resource)
+);
 CREATE TABLE IF NOT EXISTS quota_submissions (
     id        SERIAL PRIMARY KEY,
-    user_id   BIGINT REFERENCES quotas(user_id) ON DELETE CASCADE,
-    amount    INTEGER NOT NULL,
+    user_id   BIGINT,
+    resource  TEXT,
+    amount    INTEGER,
+    image_url TEXT,
     reviewed  BOOLEAN DEFAULT FALSE,
-    week_ts   DATE DEFAULT CURRENT_DATE
+    week_ts   DATE    DEFAULT CURRENT_DATE
 );
 """
 
-SET_QUOTA_SQL = """
-INSERT INTO quotas (user_id, weekly)
+SET_DEFAULT_SQL  = """
+INSERT INTO default_quotas (resource, weekly)
 VALUES ($1,$2)
-ON CONFLICT (user_id) DO UPDATE SET weekly=$2
+ON CONFLICT (resource) DO UPDATE SET weekly=$2
 """
-
-ADD_SUB_SQL = """
-INSERT INTO quota_submissions (user_id, amount, reviewed)
-VALUES ($1,$2,FALSE)
+SET_USER_SQL     = """
+INSERT INTO quotas (user_id, resource, weekly)
+VALUES ($1,$2,$3)
+ON CONFLICT (user_id, resource) DO UPDATE SET weekly=$3
 """
-
-PENDING_REVIEW_SQL = """
-SELECT id, user_id, amount
+ADD_SUB_SQL      = """
+INSERT INTO quota_submissions (user_id, resource, amount, image_url)
+VALUES ($1,$2,$3,$4)
+"""
+PENDING_SQL      = """
+SELECT id, user_id, resource, amount, image_url
 FROM quota_submissions
 WHERE reviewed=FALSE
 ORDER BY id
 """
+MARK_REVIEWED_SQL = "UPDATE quota_submissions SET reviewed=TRUE WHERE id=$1"
 
-MARK_REVIEWED_SQL  = "UPDATE quota_submissions SET reviewed=TRUE WHERE id=$1"
+LB_SQL = """
+SELECT user_id, SUM(amount) AS total
+FROM quota_submissions
+WHERE reviewed=TRUE
+  AND resource=$1
+  AND week_ts = CURRENT_DATE
+GROUP BY user_id
+ORDER BY total DESC
+LIMIT $2
+"""
 
-CLEAR_OLD_SQL      = """
+PURGE_OLD_SQL = """
 DELETE FROM quota_submissions
 WHERE week_ts < CURRENT_DATE - INTERVAL '8 days'
 """
 
 # ═══════════════════════════ COG ═══════════════════════════
 class QuotaCog(commands.Cog):
-    """Weekly quota system (Farmer role only)."""
+    """Weekly multi-resource quota system restricted to the Farmer role."""
 
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
         self._table_ready = asyncio.Event()
 
-        asyncio.create_task(self._init_tables())
+        os.makedirs(QUOTA_IMAGE_DIR, exist_ok=True)
+        asyncio.create_task(self._prepare_tables())
         self.weekly_cleanup.start()
 
-    # -------------------------------------------------------- #
-    async def _init_tables(self):
-        while self.db.pool is None:               # wait for db.connect()
+    # ────────────────────────── DB bootstrap ──────────────────────────
+    async def _prepare_tables(self):
+        while self.db.pool is None:
             await asyncio.sleep(1)
         async with self.db.pool.acquire() as conn:
             await conn.execute(CREATE_SQL)
         self._table_ready.set()
 
-    # -------------------------------------------------------- #
-    #                     Helper checks
-    # -------------------------------------------------------- #
+    # ────────────────────────── helpers ───────────────────────────────
     @staticmethod
-    def _has_farmer_role(member: discord.Member) -> bool:
+    def _has_farmer(member: discord.Member) -> bool:
         return any(r.id == FARMER_ROLE_ID for r in member.roles)
 
-    async def _farmer_check_response(self, inter: discord.Interaction) -> bool:
-        """Return True if caller has Farmer role, else respond with error."""
+    async def _farmer_check(self, inter: discord.Interaction) -> bool:
         if inter.guild is None or not isinstance(inter.user, discord.Member):
-            await inter.response.send_message(
-                "Guild context required.", ephemeral=True
-            )
+            await inter.response.send_message("Use this command inside the guild.",
+                                              ephemeral=True)
             return False
-        if not self._has_farmer_role(inter.user):
+        if not self._has_farmer(inter.user):
             await inter.response.send_message(
-                "You need the Farmer role to use quota commands.", ephemeral=True
+                "You need the Farmer role to use quota commands.",
+                ephemeral=True
             )
             return False
         return True
 
-    # -------------------------------------------------------- #
-    #                 Slash-command group
-    # -------------------------------------------------------- #
+    async def _save_images(
+        self,
+        attachments: list[discord.Attachment],
+        resource: str,
+        user_id: int
+    ) -> list[str]:
+        """
+        Save each attachment (max 10) to QUOTA_IMAGE_DIR.
+        Returns list of local file paths.
+        """
+        saved: list[str] = []
+        for att in attachments[:10]:
+            if not (att.content_type and att.content_type.startswith("image/")):
+                continue
+            ext = os.path.splitext(att.filename)[1] or ".png"
+            fname = (
+                f"{int(time.time())}_{user_id}_{resource}_"
+                f"{uuid.uuid4().hex[:8]}{ext}"
+            )
+            fpath = os.path.join(QUOTA_IMAGE_DIR, fname)
+            try:
+                await att.save(fpath)
+                saved.append(fpath)
+            except Exception as e:
+                print(f"[quota] could not save {att.filename}: {e}")
+        return saved
+
+    # ═══════════════════ SLASH-COMMAND GROUP ═══════════════════
     quota = app_commands.Group(
         name="quota",
         description="Farmer-only weekly quotas",
         default_permissions=discord.Permissions(manage_guild=True)
     )
 
-    # /quota set
-    @quota.command(name="set", description="Set weekly quota for a Farmer")
+    # -------- /quota setdefault --------
+    @quota.command(name="setdefault",
+                   description="Set global weekly quota for a resource")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def quota_set(
+    @app_commands.choices(
+        resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES]
+    )
+    async def set_default(
         self,
         inter: discord.Interaction,
-        member: discord.Member,
+        resource: app_commands.Choice[str],
         amount: app_commands.Range[int, 1, 1_000_000]
     ):
         await self._table_ready.wait()
+        await self.db.pool.execute(SET_DEFAULT_SQL, resource.value, amount)
+        await inter.response.send_message(
+            f"Set **global** {resource.value} quota to **{amount}**.",
+            ephemeral=True
+        )
 
-        if not self._has_farmer_role(member):
+    # -------- /quota set --------
+    @quota.command(name="set",
+                   description="Set per-member weekly quota for a resource")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.choices(
+        resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES]
+    )
+    async def set_user_quota(
+        self,
+        inter: discord.Interaction,
+        member: discord.Member,
+        resource: app_commands.Choice[str],
+        amount: app_commands.Range[int, 1, 1_000_000]
+    ):
+        await self._table_ready.wait()
+        if not self._has_farmer(member):
             return await inter.response.send_message(
                 f"{member.mention} does not have the Farmer role.",
                 ephemeral=True
             )
 
-        await self.db.pool.execute(SET_QUOTA_SQL, member.id, amount)
+        await self.db.pool.execute(
+            SET_USER_SQL, member.id, resource.value, amount
+        )
         await inter.response.send_message(
-            f"Set {member.mention}’s weekly quota to **{amount}**.",
+            f"Set {member.mention}’s **{resource.value}** quota to **{amount}**.",
             ephemeral=True
         )
 
-    # /quota progress
-    @quota.command(name="progress", description="Submit amount towards your quota")
-    async def quota_progress(
+    # -------- /quota submit --------
+    @quota.command(name="submit",
+                   description="Submit screenshot (works in DMs too)")
+    @app_commands.choices(
+        resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES]
+    )
+    async def submit(
         self,
         inter: discord.Interaction,
+        resource: app_commands.Choice[str],
         amount: app_commands.Range[int, 1, 1_000_000]
     ):
         await self._table_ready.wait()
-        if not await self._farmer_check_response(inter):
+        if inter.guild and not await self._farmer_check(inter):
             return
 
-        await self.db.pool.execute(ADD_SUB_SQL, inter.user.id, amount)
-        await inter.response.send_message(
-            f"Recorded **{amount}** towards your quota.",
-            ephemeral=True
-        )
-
-    # /quota leaderboard
-    @quota.command(name="leaderboard", description="Top Farmers this week")
-    async def quota_leaderboard(self, inter: discord.Interaction):
-        await self._table_ready.wait()
-
-        guild = inter.guild
-        if guild is None:
+        images = [
+            a for a in inter.attachments
+            if a.content_type and a.content_type.startswith("image/")
+        ][:10]
+        if not images:
             return await inter.response.send_message(
-                "Command must be run inside a guild.",
+                "Attach 1–10 screenshots.",
                 ephemeral=True
             )
 
-        # aggregate in SQL first, then filter to farmers
-        rows = await self.db.pool.fetch("""
-            SELECT user_id, SUM(amount) AS total
-            FROM quota_submissions
-            WHERE reviewed=TRUE AND week_ts = CURRENT_DATE
-            GROUP BY user_id
-            ORDER BY total DESC
-        """)
+        # save locally
+        saved_paths = await self._save_images(images, resource.value, inter.user.id)
 
-        # keep only members who still have the Farmer role
+        # DB rows
+        async with self.db.pool.acquire() as conn:
+            for img in images:
+                await conn.execute(
+                    ADD_SUB_SQL, inter.user.id, resource.value, amount, img.url
+                )
+
+        await inter.response.send_message(
+            f"Recorded **{amount} {resource.value}** "
+            f"from {len(images)} image(s) – thank you!",
+            ephemeral=True
+        )
+
+        # ping reviewers
+        ch = self.bot.get_channel(QUOTA_REVIEW_CH_ID)
+        if ch:
+            extra = f" (+{len(images)-1} more)" if len(images) > 1 else ""
+            await ch.send(
+                f"New **{resource.value}** submission (`{amount}`) from "
+                f"{inter.user.mention}{extra}",
+                file=await images[0].to_file(),
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
+
+    # -------- /quota leaderboard --------
+    @quota.command(name="leaderboard",
+                   description="Top reviewed submissions this week")
+    @app_commands.choices(
+        resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES]
+    )
+    async def leaderboard(
+        self, inter: discord.Interaction, resource: app_commands.Choice[str]
+    ):
+        await self._table_ready.wait()
+        if inter.guild is None:
+            return await inter.response.send_message(
+                "Run inside a guild.", ephemeral=True
+            )
+
+        rows = await self.db.pool.fetch(
+            LB_SQL, resource.value, LEADERBOARD_SIZE
+        )
         rows = [
             r for r in rows
-            if (m := guild.get_member(r["user_id"])) and self._has_farmer_role(m)
+            if (m := inter.guild.get_member(r["user_id"])) and self._has_farmer(m)
         ][:LEADERBOARD_SIZE]
 
         if not rows:
             return await inter.response.send_message(
-                "No reviewed submissions from Farmers yet this week.",
-                ephemeral=True
+                "No reviewed submissions yet.", ephemeral=True
             )
 
-        lines = []
-        for rank, r in enumerate(rows, 1):
-            member = guild.get_member(r["user_id"])
-            name   = member.mention if member else f"<@{r['user_id']}>"
-            lines.append(f"**{rank}.** {name} — `{r['total']}`")
+        msg = "\n".join(
+            f"**{i+1}.** <@{r['user_id']}> — `{r['total']}`"
+            for i, r in enumerate(rows)
+        )
+        await inter.response.send_message(msg, ephemeral=True)
 
-        await inter.response.send_message("\n".join(lines), ephemeral=True)
-
-    # /quota review
-    @quota.command(name="review", description="Review pending Farmer submissions")
+    # -------- /quota review --------
+    @quota.command(name="review", description="Review pending submissions")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def quota_review(self, inter: discord.Interaction):
+    async def review(self, inter: discord.Interaction):
         await self._table_ready.wait()
 
-        rows = await self.db.pool.fetch(PENDING_REVIEW_SQL)
+        rows = await self.db.pool.fetch(PENDING_SQL)
         if not rows:
             return await inter.response.send_message(
                 "No pending submissions.", ephemeral=True
@@ -199,44 +299,36 @@ class QuotaCog(commands.Cog):
 
         embed = discord.Embed(
             title="Pending quota submissions",
-            colour=discord.Color.blue()
+            colour=discord.Color.orange()
         )
-
         for r in rows:
-            member = inter.guild.get_member(r["user_id"])
-            name   = member.mention if member else f"<@{r['user_id']}>"
             embed.add_field(
                 name=f"ID {r['id']}",
-                value=f"{name} — `{r['amount']}`",
+                value=(
+                    f"<@{r['user_id']}> — **{r['resource']}** "
+                    f"`{r['amount']}`\n[link]({r['image_url']})"
+                ),
                 inline=False
             )
 
         await inter.response.send_message(
             embed=embed,
-            view=self.ReviewView(rows, self, inter.guild),
+            view=self.ReviewView(rows, self),
             ephemeral=True
         )
 
-    # ---------------- Review UI ----------------
+    # -------- Review UI ----------
     class ReviewView(discord.ui.View):
-        def __init__(self, rows, outer: "QuotaCog", guild: discord.Guild):
+        def __init__(self, rows, outer: "QuotaCog"):
             super().__init__(timeout=600)
             for r in rows:
-                member = guild.get_member(r["user_id"])
-                disabled = not (member and outer._has_farmer_role(member))
-                self.add_item(
-                    QuotaCog.ReviewBtn(r["id"], r["user_id"], r["amount"],
-                                       outer, disabled)
-                )
+                self.add_item(QuotaCog.ReviewBtn(r["id"], outer))
 
     class ReviewBtn(discord.ui.Button):
-        def __init__(self, sub_id, uid, amt, outer: "QuotaCog", disabled: bool):
-            super().__init__(
-                label=f"{sub_id} ✅",
-                style=discord.ButtonStyle.success,
-                disabled=disabled
-            )
-            self.sub_id, self.uid, self.amt, self.outer = sub_id, uid, amt, outer
+        def __init__(self, sub_id: int, outer: "QuotaCog"):
+            super().__init__(label=f"{sub_id} ✅",
+                             style=discord.ButtonStyle.success)
+            self.sub_id, self.outer = sub_id, outer
 
         async def callback(self, inter: discord.Interaction):
             await self.outer.db.pool.execute(MARK_REVIEWED_SQL, self.sub_id)
@@ -247,15 +339,85 @@ class QuotaCog(commands.Cog):
             self.disabled = True
             await inter.message.edit(view=self.view)
 
-    # -------------------------------------------------------- #
-    #               Weekly cleanup (Sunday 00:00 UTC)
-    # -------------------------------------------------------- #
+    # ════════════ DM listener – multi-resource & multi-image ═══════════
+    @commands.Cog.listener()
+    async def on_message(self, msg: discord.Message):
+        if msg.guild or msg.author.bot or not msg.attachments:
+            return
+
+        # 1. parse "resource amount" pairs
+        cleaned = re.sub(r"[,;:]", " ", msg.content.lower())
+        tokens  = cleaned.split()
+        pairs: dict[str, int] = defaultdict(int)
+        cur: str | None = None
+
+        for tok in tokens:
+            if tok in RESOURCES:
+                cur = tok
+            elif tok.replace(",", "").isdigit() and cur:
+                pairs[cur] += int(tok.replace(",", ""))
+                cur = None
+
+        if not pairs:
+            return await msg.channel.send(
+                "Couldn’t find any `resource amount` pairs. "
+                "Example: `stone 6000 sulfur 3500`."
+            )
+
+        # 2. collect up to 10 images
+        images = [
+            a for a in msg.attachments
+            if a.content_type and a.content_type.startswith("image/")
+        ][:10]
+        if not images:
+            return await msg.channel.send("Attachment must be an image.")
+
+        # 3. ensure sender has Farmer in any mutual guild
+        guild = next((g for g in self.bot.guilds if g.get_member(msg.author.id)), None)
+        if not guild:
+            return
+        member = guild.get_member(msg.author.id)
+        if not member or not self._has_farmer(member):
+            return await msg.channel.send(
+                "You don’t have the Farmer role in the guild."
+            )
+
+        # 4. save images locally
+        for img in images:
+            await self._save_images([img], "multi", msg.author.id)  # 'multi' placeholder
+
+        # 5. DB rows
+        await self._table_ready.wait()
+        async with self.db.pool.acquire() as conn:
+            for img in images:
+                for res, amt in pairs.items():
+                    await conn.execute(
+                        ADD_SUB_SQL, msg.author.id, res, amt, img.url
+                    )
+
+        nice = ", ".join(f"{res} `{amt}`" for res, amt in pairs.items())
+        await msg.channel.send(
+            f"Recorded {nice} from {len(images)} image(s) – thank you!"
+        )
+
+        # 6. notify staff
+        ch = self.bot.get_channel(QUOTA_REVIEW_CH_ID)
+        if ch:
+            plist = "\n".join(f"• **{res}** `{amt}`" for res, amt in pairs.items())
+            extra = f" (+{len(images)-1} more)" if len(images) > 1 else ""
+            await ch.send(
+                f"New multi-resource submission from {member.mention}{extra}:\n{plist}",
+                file=await images[0].to_file(),
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
+
+    # ═══════════════ weekly cleanup ═══════════════
     @tasks.loop(hours=1)
     async def weekly_cleanup(self):
         await self._table_ready.wait()
         now = datetime.now(timezone.utc)
-        if now.weekday() == 6 and now.hour == 0:          # Sunday midnight UTC
-            await self.db.pool.execute(CLEAR_OLD_SQL)
+        if now.weekday() == 6 and now.hour == 0:          # Sunday 00:00 UTC
+            await self.db.pool.execute(PURGE_OLD_SQL)
 
     async def cog_unload(self):
         self.weekly_cleanup.cancel()
