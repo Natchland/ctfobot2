@@ -1734,6 +1734,7 @@ async def _run_bot():
     await (import_module("cogs.stats").setup)(bot, db)
     await (import_module("cogs.recruit_reminder").setup)(bot, db)
     await (import_module("cogs.welcome_member").setup)(bot, db)
+    await (import_module("cogs.quota").setup)(bot, db)
 
     await bot.start(BOT_TOKEN)
 
