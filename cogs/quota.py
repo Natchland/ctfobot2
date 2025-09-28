@@ -15,8 +15,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 FARMER_ROLE_ID      = 1379918816871448686
-QUOTA_REVIEW_CH_ID  = 0                       # staff channel for review
-PUBLIC_QUOTA_CH_ID  = 1421945592522739824     # public progress channel
+QUOTA_REVIEW_CH_ID  = 0
+PUBLIC_QUOTA_CH_ID  = 1421945592522739824
 RESOURCES           = ["stone", "sulfur", "metal", "wood"]
 LEADERBOARD_SIZE    = 10
 QUOTA_IMAGE_DIR     = "/data/quota_images"
@@ -244,11 +244,13 @@ class QuotaCog(commands.Cog):
                     tid, r, need)
         await inter.response.send_message("Task created.", ephemeral=True)
 
+    # >>> FIXED: confirm is now *required* so the UI shows a toggle
     @quota.command(name="reset", description="Wipe all quota data")
     @app_commands.checks.has_permissions(administrator=True)
-    async def reset(self, inter: discord.Interaction, confirm: bool = False):
+    @app_commands.describe(confirm="Toggle true to execute the wipe")
+    async def reset(self, inter: discord.Interaction, confirm: bool):
         if not confirm:
-            return await inter.response.send_message("Add confirm:true to execute.", ephemeral=True)
+            return await inter.response.send_message("Cancelled.", ephemeral=True)
         await self._table_ready.wait()
         async with self.db.pool.acquire() as conn:
             ch = self.bot.get_channel(PUBLIC_QUOTA_CH_ID)
