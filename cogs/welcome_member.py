@@ -61,7 +61,8 @@ class WelcomeMember(commands.Cog):
             "- <#1403891526844551228> **Loot Thread - for any loot obtained you wish to share**\n"
             "- <#1414663176666222673> **In-Game Names - Make sure to post yours to avoid any confusion**\n"
             "- <#1413929735658016899> **Giveaways - Automatic entry for active members**\n"
-            "- <#1416559771103924415> **Clan Guidelines & Support**"
+            "- <#1416559771103924415> **Clan Guidelines & Support**\n"
+            "- <#1421945592522739824> **Quotas(New) - To improve clan progress and help with motivation**"
         )
 
         await channel.send(
