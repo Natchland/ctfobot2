@@ -15,12 +15,12 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # ─────────────── CONFIG ───────────────
-FARMER_ROLE_ID      = 1379918816871448686        # role allowed to submit quotas
-QUOTA_REVIEW_CH_ID  = 1421920458437169254        # staff review channel
-PUBLIC_QUOTA_CH_ID  = 1421945592522739824        # public “tasks” channel
+FARMER_ROLE_ID      = 1379918816871448686
+QUOTA_REVIEW_CH_ID  = 1421920458437169254
+PUBLIC_QUOTA_CH_ID  = 1421945592522739824
 RESOURCES           = ["stone", "sulfur", "metal", "wood"]
 LEADERBOARD_SIZE    = 10
-QUOTA_IMAGE_DIR     = "/data/quota_images"       # Railway/S3 mount
+QUOTA_IMAGE_DIR     = "/data/quota_images"
 PROGRESS_BAR_LEN    = 20
 
 # ─────────────── SQL ───────────────
@@ -102,7 +102,7 @@ PURGE_OLD_SQL = "DELETE FROM quota_submissions WHERE week_ts < CURRENT_DATE - IN
 
 # ════════════════ COG ════════════════
 class QuotaCog(commands.Cog):
-    # ────────── UI classes first (so Pylance sees them) ──────────
+    # ────────── UI CLASSES ──────────
     class AcceptUserBtn(discord.ui.Button):
         def __init__(self, ids: List[int], uid: int, outer: "QuotaCog"):
             super().__init__(label=f"{uid} ✅", style=discord.ButtonStyle.success)
@@ -149,7 +149,7 @@ class QuotaCog(commands.Cog):
             super().__init__(timeout=60)
             self.add_item(QuotaCog.ResetConfirmBtn(outer))
 
-    # ────────── COG INIT ──────────
+    # ────────── INIT ──────────
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
         self._table_ready = asyncio.Event()
@@ -157,7 +157,6 @@ class QuotaCog(commands.Cog):
         asyncio.create_task(self._prepare_tables())
         self.weekly_cleanup.start()
 
-    # ────────── DB Init ──────────
     async def _prepare_tables(self):
         while self.db.pool is None:
             await asyncio.sleep(1)
@@ -166,15 +165,17 @@ class QuotaCog(commands.Cog):
         self._table_ready.set()
         asyncio.create_task(self.refresh_all_tasks())
 
-    # ────────── helpers ──────────
+    # ────────── HELPER METHODS ──────────
     def _has_farmer(self, m: discord.Member) -> bool:
         return any(r.id == FARMER_ROLE_ID for r in m.roles)
 
     async def _farmer_check(self, inter: discord.Interaction) -> bool:
         if inter.guild is None or not isinstance(inter.user, discord.Member):
-            await inter.response.send_message("Run inside guild.", ephemeral=True); return False
+            await inter.response.send_message("Run inside guild.", ephemeral=True)
+            return False
         if not self._has_farmer(inter.user):
-            await inter.response.send_message("Farmer role required.", ephemeral=True); return False
+            await inter.response.send_message("Farmer role required.", ephemeral=True)
+            return False
         return True
 
     async def _save_images(self, atts: List[discord.Attachment], res: str, uid: int):
@@ -199,7 +200,7 @@ class QuotaCog(commands.Cog):
                       view=QuotaCog.SingleAcceptView(self, ids),
                       allowed_mentions=discord.AllowedMentions(users=True))
 
-    # ────────── TASK refresh ──────────
+    # ────────── TASK HANDLING ──────────
     async def refresh_all_tasks(self):
         await self._table_ready.wait()
         async with self.db.pool.acquire() as conn:
@@ -251,7 +252,7 @@ class QuotaCog(commands.Cog):
         if completed and not task["completed"]:
             await conn.execute("UPDATE quota_tasks SET completed=TRUE WHERE id=$1", task_id)
 
-    # ────────── Slash-command group ──────────
+    # ────────── SLASH COMMAND GROUP ──────────
     quota = app_commands.Group(
         name="quota",
         description="Quota commands",
@@ -299,7 +300,7 @@ class QuotaCog(commands.Cog):
 
         await inter.response.send_message("Task created and posted.", ephemeral=True)
 
-    # ----- /quota reset (button confirm) -----
+    # ----- /quota reset -----
     @quota.command(name="reset", description="Wipe ALL quota data (button confirm)")
     @app_commands.checks.has_permissions(administrator=True)
     async def reset(self, inter: discord.Interaction):
@@ -307,11 +308,9 @@ class QuotaCog(commands.Cog):
             title="⚠️ Wipe all quota data?",
             description="Deletes every submission, task and message.",
             colour=discord.Color.red())
-        await inter.response.send_message(
-            embed=embed,
-            view=QuotaCog.ResetConfirmView(self),
-            ephemeral=True
-        )
+        await inter.response.send_message(embed=embed,
+                                          view=QuotaCog.ResetConfirmView(self),
+                                          ephemeral=True)
 
     async def _wipe_all_data(self):
         async with self.db.pool.acquire() as conn:
@@ -320,7 +319,8 @@ class QuotaCog(commands.Cog):
             if ch:
                 for row in msg_ids:
                     try:
-                        m = await ch.fetch_message(row["message_id"]); await m.delete()
+                        m = await ch.fetch_message(row["message_id"])
+                        await m.delete()
                     except discord.NotFound:
                         pass
             await conn.execute("TRUNCATE quota_submissions, quota_tasks, quota_task_needs RESTART IDENTITY")
@@ -350,19 +350,39 @@ class QuotaCog(commands.Cog):
         await self.db.pool.execute(SET_USER_SQL, member.id, resource.value, amount)
         await inter.response.send_message("Member quota set.", ephemeral=True)
 
-    # ----- /quota submit -----
-    @quota.command(name="submit", description="Submit screenshots")
+    # ----- /quota submit (Attachment options) -----
+    @quota.command(name="submit", description="Submit up to 10 screenshots")
     @app_commands.choices(resource=[app_commands.Choice(name=r, value=r) for r in RESOURCES])
-    async def submit(self, inter: discord.Interaction,
-                     resource: app_commands.Choice[str],
-                     amount: app_commands.Range[int, 1, 1_000_000]):
+    @app_commands.describe(
+        image1="Screenshot 1", image2="Screenshot 2", image3="Screenshot 3",
+        image4="Screenshot 4", image5="Screenshot 5", image6="Screenshot 6",
+        image7="Screenshot 7", image8="Screenshot 8", image9="Screenshot 9",
+        image10="Screenshot 10"
+    )
+    async def submit(
+        self,
+        inter: discord.Interaction,
+        resource: app_commands.Choice[str],
+        amount: app_commands.Range[int, 1, 1_000_000],
+        image1: Optional[discord.Attachment] = None,
+        image2: Optional[discord.Attachment] = None,
+        image3: Optional[discord.Attachment] = None,
+        image4: Optional[discord.Attachment] = None,
+        image5: Optional[discord.Attachment] = None,
+        image6: Optional[discord.Attachment] = None,
+        image7: Optional[discord.Attachment] = None,
+        image8: Optional[discord.Attachment] = None,
+        image9: Optional[discord.Attachment] = None,
+        image10: Optional[discord.Attachment] = None,
+    ):
         await self._table_ready.wait()
         if inter.guild and not await self._farmer_check(inter):
             return
 
-        imgs = [a for a in inter.attachments if a.content_type and a.content_type.startswith("image/")][:10]
+        imgs = [i for i in (image1, image2, image3, image4, image5,
+                            image6, image7, image8, image9, image10) if i][:10]
         if not imgs:
-            return await inter.response.send_message("Attach 1-10 images.", ephemeral=True)
+            return await inter.response.send_message("Attach at least one image.", ephemeral=True)
 
         await self._save_images(imgs, resource.value, inter.user.id)
 
@@ -370,7 +390,8 @@ class QuotaCog(commands.Cog):
         async with self.db.pool.acquire() as conn:
             for img in imgs:
                 rid = await conn.fetchval(
-                    "INSERT INTO quota_submissions (user_id,resource,amount,image_url) VALUES ($1,$2,$3,$4) RETURNING id",
+                    "INSERT INTO quota_submissions (user_id,resource,amount,image_url) "
+                    "VALUES ($1,$2,$3,$4) RETURNING id",
                     inter.user.id, resource.value, amount, img.url)
                 ids.append(rid)
 
@@ -387,7 +408,8 @@ class QuotaCog(commands.Cog):
             return await inter.response.send_message("Run in guild.", ephemeral=True)
 
         rows = await self.db.pool.fetch(LB_SQL, resource.value, LEADERBOARD_SIZE)
-        rows = [r for r in rows if (m := inter.guild.get_member(r["user_id"])) and self._has_farmer(m)]
+        rows = [r for r in rows
+                if (m := inter.guild.get_member(r["user_id"])) and self._has_farmer(m)]
         if not rows:
             return await inter.response.send_message("No data yet.", ephemeral=True)
 
@@ -457,7 +479,7 @@ class QuotaCog(commands.Cog):
         await msg.channel.send("Submission received – thank you!")
         await self._notify_staff(member, pairs, imgs, ids)
 
-    # ────────── House-keeping tasks ──────────
+    # ────────── TASKS ──────────
     @tasks.loop(hours=1)
     async def weekly_cleanup(self):
         await self._table_ready.wait()
