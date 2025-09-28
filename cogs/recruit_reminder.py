@@ -11,11 +11,11 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # ─────────────────────────── CONFIG ───────────────────────────
-RECRUIT_CHANNEL_ID   = 1421856820460388383       # channel that hosts the reminder
-RECRUITMENT_ROLE_ID  = 1410659214959054988       # staff role allowed to click “Accept”
+RECRUIT_CHANNEL_ID   = 1421856820460388383      # channel that hosts the reminder
+RECRUITMENT_ROLE_ID  = 1410659214959054988      # staff role allowed to click “Accept”
 
-SHIFT_SECONDS        = 6 * 60 * 60               # one shift = 6 h
-UPDATE_INTERVAL      = 15                        # edit frequency (seconds)
+SHIFT_SECONDS   = 6 * 60 * 60                  # 6-hour shift
+UPDATE_INTERVAL = 15                           # how often we edit the message (s)
 
 # ─────────────────────────── SQL ──────────────────────────────
 CREATE_SQL = """
@@ -43,29 +43,29 @@ class RecruitReminder(commands.Cog):
     # ---------------------------------------------------------
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
-        self._table_ready = asyncio.Event()
+        self._table_ready = asyncio.Event()          # set once helper table exists
 
-        # start the updater loop (blocks on _table_ready)
+        # start the updater (it will wait on _table_ready)
         self.update_message.start()
 
-        # background task: wait for db.pool, then create table & set event
+        # background task waits until db.pool exists, then creates the table
         asyncio.create_task(self._prepare_table())
 
     # ---------------------------------------------------------
     #           create helper table once pool exists
     # ---------------------------------------------------------
     async def _prepare_table(self):
-        while self.db.pool is None:
-            await asyncio.sleep(1)                # wait for db.connect()
+        while self.db.pool is None:                 # wait for db.connect()
+            await asyncio.sleep(1)
         async with self.db.pool.acquire() as conn:
             await conn.execute(CREATE_SQL)
-        self._table_ready.set()                   # unleash the updater loop
+        self._table_ready.set()                     # unleash updater
 
     # ---------------------------------------------------------
     #                  DB convenience helpers
     # ---------------------------------------------------------
     async def _get_state(self) -> dict[str, Optional[int]]:
-        if self.db.pool is None:                  # pool still not ready
+        if self.db.pool is None:                    # pool not ready yet
             return {"message_id": None, "claimed_by": None, "end_ts": None}
 
         async with self.db.pool.acquire() as conn:
@@ -79,7 +79,7 @@ class RecruitReminder(commands.Cog):
                                       "end_ts": None}
 
     async def _set_state(self, *, message_id, claimed_by, end_ts):
-        if self.db.pool is None:                  # too early – ignore command
+        if self.db.pool is None:                    # too early, silently ignore
             return
         async with self.db.pool.acquire() as conn:
             try:
@@ -104,42 +104,42 @@ class RecruitReminder(commands.Cog):
         )
         async def accept(self, inter: discord.Interaction, _):
             guild = inter.guild
-            staff_role = guild.get_role(RECRUITMENT_ROLE_ID)
+            role  = guild.get_role(RECRUITMENT_ROLE_ID)
 
             if not (
                 inter.user.guild_permissions.administrator
-                or (staff_role and staff_role in inter.user.roles)
+                or (role and role in inter.user.roles)
             ):
                 return await inter.response.send_message(
                     "You’re not recruitment staff.", ephemeral=True
                 )
 
             end_ts = int(datetime.now(timezone.utc).timestamp()) + SHIFT_SECONDS
-
             await self.outer._set_state(
                 message_id=inter.message.id,
                 claimed_by=inter.user.id,
                 end_ts=end_ts
             )
 
-            for child in self.children:           # disable the button
-                child.disabled = True
+            # disable button
+            for c in self.children:
+                c.disabled = True
 
             await inter.message.edit(
                 content=(
-                    f"✅ {inter.user.mention} is handling recruitment "
-                    f"for the next **6 hours**."
+                    f"✅ {inter.user.mention} has sent out recruitment — "
+                    f"next recruitment posts can be sent in **6 hours**."
                 ),
                 view=self
             )
-            await inter.response.send_message("Shift accepted – thank you!", ephemeral=True)
+            await inter.response.send_message("Shift accepted — thank you!", ephemeral=True)
 
     # ---------------------------------------------------------
-    #              15-second updater loop
+    #                  15-second updater loop
     # ---------------------------------------------------------
     @tasks.loop(seconds=UPDATE_INTERVAL)
     async def update_message(self):
-        await self._table_ready.wait()            # wait until table exists
+        await self._table_ready.wait()              # ensure table exists
 
         state   = await self._get_state()
         channel = self.bot.get_channel(RECRUIT_CHANNEL_ID)
@@ -148,31 +148,27 @@ class RecruitReminder(commands.Cog):
 
         now_ts = int(datetime.now(timezone.utc).timestamp())
 
-        # 1) -- no message stored → create prompt
+        # 1️⃣  no message stored → create prompt
         if state["message_id"] is None:
             msg = await channel.send(
-                f"<@&{RECRUITMENT_ROLE_ID}> Any staff available to recruit?\n"
-                "Click **Accept** below to claim the next six-hour shift.",
+                f"<@&{RECRUITMENT_ROLE_ID}> Click **Accept** below.",
                 view=self.AcceptView(self)
             )
             await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
             return
 
-        # 2) -- fetch message; recreate if deleted
+        # 2️⃣  fetch existing message, recreate if deleted
         try:
             msg = await channel.fetch_message(state["message_id"])
         except discord.NotFound:
             await self._set_state(message_id=None, claimed_by=None, end_ts=None)
             return
 
-        # 3) -- active shift?
+        # 3️⃣  shift active?
         if state["end_ts"]:
-            if now_ts >= state["end_ts"]:         # expired → reset
+            if now_ts >= state["end_ts"]:           # expired → reset
                 await msg.edit(
-                    content=(
-                        f"<@&{RECRUITMENT_ROLE_ID}> Any staff available to recruit?\n"
-                        "Click **Accept** below to claim the next six-hour shift."
-                    ),
+                    content=f"<@&{RECRUITMENT_ROLE_ID}> Click **Accept** below.",
                     view=self.AcceptView(self)
                 )
                 await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
@@ -182,20 +178,19 @@ class RecruitReminder(commands.Cog):
                 mins      = rem // 60
                 await msg.edit(
                     content=(
-                        f"✅ <@{state['claimed_by']}> is handling recruitment "
-                        f"for the next **{hrs} h {mins:02} m**."
+                        f"✅ <@{state['claimed_by']}> has sent out recruitment — "
+                        f"next recruitment posts can be sent in **{hrs} h {mins:02} m**."
                     )
                 )
-        else:
-            if not msg.components:                # ensure button visible
+        else:                                       # idle but message exists
+            if not msg.components:                  # make sure button visible
                 await msg.edit(view=self.AcceptView(self))
 
     # ---------------------------------------------------------
-    #        Re-attach view on every reconnect
+    #              re-attach view on reconnect
     # ---------------------------------------------------------
     @commands.Cog.listener()
     async def on_ready(self):
-        # (table may already be ready; if not, _prepare_table is still running)
         state = await self._get_state()
         if state["message_id"]:
             self.bot.add_view(self.AcceptView(self), message_id=state["message_id"])
@@ -216,6 +211,6 @@ class RecruitReminder(commands.Cog):
         )
 
 
-# ────────────────────────── setup entry-point ─────────────────────────
+# ─────────────────────────── setup hook ────────────────────────────
 async def setup(bot, db):
     await bot.add_cog(RecruitReminder(bot, db))
