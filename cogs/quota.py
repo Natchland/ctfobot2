@@ -1,166 +1,265 @@
 # cogs/quota.py
+from __future__ import annotations
+
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+import asyncpg
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
-CREATE_QUOTAS_SQL = """
+# ───────────────────────── CONFIG ──────────────────────────
+FARMER_ROLE_ID  = 1379918816871448686      # only these members have quotas
+LEADERBOARD_SIZE = 10                      # /quota leaderboard top-N
+
+# ───────────────────────── SQL ─────────────────────────────
+CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS quotas (
-    id SERIAL PRIMARY KEY,
-    resource TEXT NOT NULL,
-    amount INTEGER NOT NULL,
-    deadline TIMESTAMP NOT NULL,
-    active BOOLEAN NOT NULL DEFAULT TRUE
+    user_id BIGINT PRIMARY KEY,
+    weekly  INTEGER NOT NULL DEFAULT 0          -- target amount
 );
-"""
 
-CREATE_SUBMISSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS quota_submissions (
-    id SERIAL PRIMARY KEY,
-    quota_id INTEGER REFERENCES quotas(id),
-    user_id BIGINT NOT NULL,
-    amount INTEGER NOT NULL,
-    proof TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    submitted_at TIMESTAMP DEFAULT now()
+    id        SERIAL PRIMARY KEY,
+    user_id   BIGINT REFERENCES quotas(user_id) ON DELETE CASCADE,
+    amount    INTEGER NOT NULL,
+    reviewed  BOOLEAN DEFAULT FALSE,
+    week_ts   DATE DEFAULT CURRENT_DATE
 );
 """
 
+SET_QUOTA_SQL = """
+INSERT INTO quotas (user_id, weekly)
+VALUES ($1,$2)
+ON CONFLICT (user_id) DO UPDATE SET weekly=$2
+"""
+
+ADD_SUB_SQL = """
+INSERT INTO quota_submissions (user_id, amount, reviewed)
+VALUES ($1,$2,FALSE)
+"""
+
+PENDING_REVIEW_SQL = """
+SELECT id, user_id, amount
+FROM quota_submissions
+WHERE reviewed=FALSE
+ORDER BY id
+"""
+
+MARK_REVIEWED_SQL  = "UPDATE quota_submissions SET reviewed=TRUE WHERE id=$1"
+
+CLEAR_OLD_SQL      = """
+DELETE FROM quota_submissions
+WHERE week_ts < CURRENT_DATE - INTERVAL '8 days'
+"""
+
+# ═══════════════════════════ COG ═══════════════════════════
 class QuotaCog(commands.Cog):
-    def __init__(self, bot, db):
+    """Weekly quota system (Farmer role only)."""
+
+    def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
+        self._table_ready = asyncio.Event()
+
         asyncio.create_task(self._init_tables())
+        self.weekly_cleanup.start()
 
+    # -------------------------------------------------------- #
     async def _init_tables(self):
-        await self.bot.wait_until_ready()
+        while self.db.pool is None:               # wait for db.connect()
+            await asyncio.sleep(1)
         async with self.db.pool.acquire() as conn:
-            await conn.execute(CREATE_QUOTAS_SQL)
-            await conn.execute(CREATE_SUBMISSIONS_SQL)
+            await conn.execute(CREATE_SQL)
+        self._table_ready.set()
 
-    # Admin-only: Set a new quota
-    @app_commands.command(name="quota_set", description="Set a resource quota (admin only)")
-    @app_commands.describe(resource="Resource (e.g. sulfur)", amount="Required amount", deadline="Deadline (YYYY-MM-DD)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def quota_set(self, inter: discord.Interaction, resource: str, amount: int, deadline: str):
-        try:
-            deadline_dt = datetime.strptime(deadline, "%Y-%m-%d")
-        except ValueError:
-            return await inter.response.send_message("Invalid date format! Use YYYY-MM-DD.", ephemeral=True)
-        async with self.db.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO quotas (resource, amount, deadline, active) VALUES ($1, $2, $3, TRUE)",
-                resource.lower(), amount, deadline_dt
-            )
-        await inter.response.send_message(f"Quota set: **{resource}** — **{amount}** by **{deadline}**.", ephemeral=True)
+    # -------------------------------------------------------- #
+    #                     Helper checks
+    # -------------------------------------------------------- #
+    @staticmethod
+    def _has_farmer_role(member: discord.Member) -> bool:
+        return any(r.id == FARMER_ROLE_ID for r in member.roles)
 
-    # List all active quotas
-    @app_commands.command(name="quota_progress", description="View current quotas and your contributions")
-    async def quota_progress(self, inter: discord.Interaction):
-        async with self.db.pool.acquire() as conn:
-            quotas = await conn.fetch(
-                "SELECT * FROM quotas WHERE active=TRUE AND deadline >= now() ORDER BY deadline"
+    async def _farmer_check_response(self, inter: discord.Interaction) -> bool:
+        """Return True if caller has Farmer role, else respond with error."""
+        if inter.guild is None or not isinstance(inter.user, discord.Member):
+            await inter.response.send_message(
+                "Guild context required.", ephemeral=True
             )
-            if not quotas:
-                return await inter.response.send_message("No active quotas set.", ephemeral=True)
-            msg = "**Current Quotas:**\n"
-            for q in quotas:
-                # Sum user's contributions
-                contrib = await conn.fetchval(
-                    "SELECT COALESCE(SUM(amount),0) FROM quota_submissions WHERE quota_id=$1 AND user_id=$2 AND status='approved'",
-                    q["id"], inter.user.id
-                )
-                msg += (
-                    f"- **{q['resource'].capitalize()}**: {contrib}/{q['amount']} "
-                    f"(by {q['deadline'].date()})\n"
-                )
-            await inter.response.send_message(msg, ephemeral=True)
+            return False
+        if not self._has_farmer_role(inter.user):
+            await inter.response.send_message(
+                "You need the Farmer role to use quota commands.", ephemeral=True
+            )
+            return False
+        return True
 
-    # Submit a contribution
-    @app_commands.command(name="quota_submit", description="Submit your resource contribution")
-    @app_commands.describe(resource="Resource name", amount="Amount contributed", proof="Optional proof (imgur/discord link)")
-    async def quota_submit(self, inter: discord.Interaction, resource: str, amount: int, proof: str = None):
-        async with self.db.pool.acquire() as conn:
-            quota = await conn.fetchrow(
-                "SELECT * FROM quotas WHERE resource=$1 AND active=TRUE AND deadline >= now()",
-                resource.lower()
-            )
-            if not quota:
-                return await inter.response.send_message("No active quota for that resource.", ephemeral=True)
-            await conn.execute(
-                "INSERT INTO quota_submissions (quota_id, user_id, amount, proof) VALUES ($1,$2,$3,$4)",
-                quota["id"], inter.user.id, amount, proof
-            )
-        await inter.response.send_message("Submission received! A staff member will review it soon.", ephemeral=True)
+    # -------------------------------------------------------- #
+    #                 Slash-command group
+    # -------------------------------------------------------- #
+    quota = app_commands.Group(
+        name="quota",
+        description="Farmer-only weekly quotas",
+        default_permissions=discord.Permissions(manage_guild=True)
+    )
 
-    # Leaderboard for a resource
-    @app_commands.command(name="quota_leaderboard", description="Show the leaderboard for a quota resource")
-    @app_commands.describe(resource="Resource name")
-    async def quota_leaderboard(self, inter: discord.Interaction, resource: str):
-        async with self.db.pool.acquire() as conn:
-            quota = await conn.fetchrow(
-                "SELECT * FROM quotas WHERE resource=$1 AND active=TRUE AND deadline >= now()",
-                resource.lower()
-            )
-            if not quota:
-                return await inter.response.send_message("No active quota for that resource.", ephemeral=True)
-            rows = await conn.fetch(
-                "SELECT user_id, SUM(amount) as total FROM quota_submissions WHERE quota_id=$1 AND status='approved' GROUP BY user_id ORDER BY total DESC",
-                quota["id"]
-            )
-            if not rows:
-                return await inter.response.send_message("No contributions yet.", ephemeral=True)
-            msg = f"**Leaderboard for {resource.capitalize()}:**\n"
-            for i, row in enumerate(rows, 1):
-                user = inter.guild.get_member(row["user_id"])
-                user_str = user.mention if user else f"<@{row['user_id']}>"
-                msg += f"{i}. {user_str}: {row['total']}\n"
-            await inter.response.send_message(msg, ephemeral=True)
+    # /quota set
+    @quota.command(name="set", description="Set weekly quota for a Farmer")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def quota_set(
+        self,
+        inter: discord.Interaction,
+        member: discord.Member,
+        amount: app_commands.Range[int, 1, 1_000_000]
+    ):
+        await self._table_ready.wait()
 
-    # Staff: review submissions (approve/deny)
-    @app_commands.command(name="quota_review", description="Review quota submissions (admin/reviewer only)")
-    @app_commands.checks.has_permissions(administrator=True)
+        if not self._has_farmer_role(member):
+            return await inter.response.send_message(
+                f"{member.mention} does not have the Farmer role.",
+                ephemeral=True
+            )
+
+        await self.db.pool.execute(SET_QUOTA_SQL, member.id, amount)
+        await inter.response.send_message(
+            f"Set {member.mention}’s weekly quota to **{amount}**.",
+            ephemeral=True
+        )
+
+    # /quota progress
+    @quota.command(name="progress", description="Submit amount towards your quota")
+    async def quota_progress(
+        self,
+        inter: discord.Interaction,
+        amount: app_commands.Range[int, 1, 1_000_000]
+    ):
+        await self._table_ready.wait()
+        if not await self._farmer_check_response(inter):
+            return
+
+        await self.db.pool.execute(ADD_SUB_SQL, inter.user.id, amount)
+        await inter.response.send_message(
+            f"Recorded **{amount}** towards your quota.",
+            ephemeral=True
+        )
+
+    # /quota leaderboard
+    @quota.command(name="leaderboard", description="Top Farmers this week")
+    async def quota_leaderboard(self, inter: discord.Interaction):
+        await self._table_ready.wait()
+
+        guild = inter.guild
+        if guild is None:
+            return await inter.response.send_message(
+                "Command must be run inside a guild.",
+                ephemeral=True
+            )
+
+        # aggregate in SQL first, then filter to farmers
+        rows = await self.db.pool.fetch("""
+            SELECT user_id, SUM(amount) AS total
+            FROM quota_submissions
+            WHERE reviewed=TRUE AND week_ts = CURRENT_DATE
+            GROUP BY user_id
+            ORDER BY total DESC
+        """)
+
+        # keep only members who still have the Farmer role
+        rows = [
+            r for r in rows
+            if (m := guild.get_member(r["user_id"])) and self._has_farmer_role(m)
+        ][:LEADERBOARD_SIZE]
+
+        if not rows:
+            return await inter.response.send_message(
+                "No reviewed submissions from Farmers yet this week.",
+                ephemeral=True
+            )
+
+        lines = []
+        for rank, r in enumerate(rows, 1):
+            member = guild.get_member(r["user_id"])
+            name   = member.mention if member else f"<@{r['user_id']}>"
+            lines.append(f"**{rank}.** {name} — `{r['total']}`")
+
+        await inter.response.send_message("\n".join(lines), ephemeral=True)
+
+    # /quota review
+    @quota.command(name="review", description="Review pending Farmer submissions")
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def quota_review(self, inter: discord.Interaction):
-        async with self.db.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM quota_submissions WHERE status='pending' ORDER BY submitted_at LIMIT 1"
-            )
-            if not row:
-                return await inter.response.send_message("No pending submissions.", ephemeral=True)
-            user = inter.guild.get_member(row["user_id"])
-            user_str = user.mention if user else f"<@{row['user_id']}>"
-            embed = discord.Embed(
-                title="Quota Submission",
-                description=f"**User:** {user_str}\n**Resource:** {row['quota_id']}\n**Amount:** {row['amount']}\n**Proof:** {row['proof'] or 'None'}",
-                color=discord.Color.orange()
-            )
-            view = QuotaReviewView(self.db, row['id'])
-            await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+        await self._table_ready.wait()
 
-class QuotaReviewView(discord.ui.View):
-    def __init__(self, db, submission_id):
-        super().__init__(timeout=60)
-        self.db = db
-        self.submission_id = submission_id
-
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
-    async def approve(self, inter: discord.Interaction, _):
-        async with self.db.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE quota_submissions SET status='approved' WHERE id=$1",
-                self.submission_id
+        rows = await self.db.pool.fetch(PENDING_REVIEW_SQL)
+        if not rows:
+            return await inter.response.send_message(
+                "No pending submissions.", ephemeral=True
             )
-        await inter.response.edit_message(content="Submission approved.", view=None)
 
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
-    async def deny(self, inter: discord.Interaction, _):
-        async with self.db.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE quota_submissions SET status='denied' WHERE id=$1",
-                self.submission_id
+        embed = discord.Embed(
+            title="Pending quota submissions",
+            colour=discord.Color.blue()
+        )
+
+        for r in rows:
+            member = inter.guild.get_member(r["user_id"])
+            name   = member.mention if member else f"<@{r['user_id']}>"
+            embed.add_field(
+                name=f"ID {r['id']}",
+                value=f"{name} — `{r['amount']}`",
+                inline=False
             )
-        await inter.response.edit_message(content="Submission denied.", view=None)
 
-# --- setup() hook for cog loading ---
+        await inter.response.send_message(
+            embed=embed,
+            view=self.ReviewView(rows, self, inter.guild),
+            ephemeral=True
+        )
+
+    # ---------------- Review UI ----------------
+    class ReviewView(discord.ui.View):
+        def __init__(self, rows, outer: "QuotaCog", guild: discord.Guild):
+            super().__init__(timeout=600)
+            for r in rows:
+                member = guild.get_member(r["user_id"])
+                disabled = not (member and outer._has_farmer_role(member))
+                self.add_item(
+                    QuotaCog.ReviewBtn(r["id"], r["user_id"], r["amount"],
+                                       outer, disabled)
+                )
+
+    class ReviewBtn(discord.ui.Button):
+        def __init__(self, sub_id, uid, amt, outer: "QuotaCog", disabled: bool):
+            super().__init__(
+                label=f"{sub_id} ✅",
+                style=discord.ButtonStyle.success,
+                disabled=disabled
+            )
+            self.sub_id, self.uid, self.amt, self.outer = sub_id, uid, amt, outer
+
+        async def callback(self, inter: discord.Interaction):
+            await self.outer.db.pool.execute(MARK_REVIEWED_SQL, self.sub_id)
+            await inter.response.send_message(
+                f"Submission **{self.sub_id}** marked reviewed.",
+                ephemeral=True
+            )
+            self.disabled = True
+            await inter.message.edit(view=self.view)
+
+    # -------------------------------------------------------- #
+    #               Weekly cleanup (Sunday 00:00 UTC)
+    # -------------------------------------------------------- #
+    @tasks.loop(hours=1)
+    async def weekly_cleanup(self):
+        await self._table_ready.wait()
+        now = datetime.now(timezone.utc)
+        if now.weekday() == 6 and now.hour == 0:          # Sunday midnight UTC
+            await self.db.pool.execute(CLEAR_OLD_SQL)
+
+    async def cog_unload(self):
+        self.weekly_cleanup.cancel()
+
+# ───────────────────────── setup hook ─────────────────────────
 async def setup(bot, db):
     await bot.add_cog(QuotaCog(bot, db))
