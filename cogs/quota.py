@@ -21,7 +21,7 @@ PUBLIC_QUOTA_CH_ID  = 1421945592522739824
 RESOURCES           = ["stone", "sulfur", "metal", "wood"]
 LEADERBOARD_SIZE    = 10
 QUOTA_IMAGE_DIR     = "/data/quota_images"
-PROGRESS_BAR_LEN    = 20
+PROGRESS_BAR_LEN    = 25                       # prettier bar width
 
 # ─────────────── SQL ───────────────
 CREATE_SQL = """
@@ -110,7 +110,8 @@ class QuotaCog(commands.Cog):
         async def callback(self, inter: discord.Interaction):
             await self.outer.db.pool.execute(MARK_MANY_SQL, self.ids)
             await inter.response.send_message("Reviewed.", ephemeral=True)
-            self.disabled, self.label = True, "Reviewed"
+            self.disabled = True
+            self.label = "Reviewed"
             await inter.message.edit(view=self.view)
             await self.outer.refresh_all_tasks()
 
@@ -127,7 +128,8 @@ class QuotaCog(commands.Cog):
         async def callback(self, inter: discord.Interaction):
             await self.outer.db.pool.execute(MARK_MANY_SQL, self.ids)
             await inter.response.send_message("Marked reviewed.", ephemeral=True)
-            self.disabled, self.label = True, "Reviewed"
+            self.disabled = True
+            self.label = "Reviewed"
             await inter.message.edit(view=self.view, content="**(reviewed)**")
             await self.outer.refresh_all_tasks()
 
@@ -185,10 +187,14 @@ class QuotaCog(commands.Cog):
                 name = f"{int(time.time())}_{uid}_{res}_{uuid.uuid4().hex[:8]}{ext}"
                 await att.save(os.path.join(QUOTA_IMAGE_DIR, name))
 
-    def _bar(self, have: int, need: int) -> str:
-        pct = min(1, have / need) if need else 1
-        filled = int(pct * PROGRESS_BAR_LEN)
-        return "█" * filled + "─" * (PROGRESS_BAR_LEN - filled)
+    # prettier block bar ▰ ▱  + percentage
+    def _bar(self, have: int, need: int, length: int = PROGRESS_BAR_LEN) -> str:
+        if need <= 0:
+            return "—"
+        pct = max(0.0, min(1.0, have / need))
+        filled = round(pct * length)
+        bar = "▰" * filled + "▱" * (length - filled)
+        return f"{bar}  {pct*100:5.1f}%"
 
     async def _notify_staff(self, member, pairs, images, ids):
         ch = self.bot.get_channel(QUOTA_REVIEW_CH_ID)
@@ -211,7 +217,7 @@ class QuotaCog(commands.Cog):
     async def _refresh_task_embed(self, conn, task):
         task_id, start = task["id"], task["start_sub"]
         needs = await conn.fetch("SELECT resource,required FROM quota_task_needs WHERE task_id=$1", task_id)
-        prog: Dict[str,int] = {}
+        prog: Dict[str, int] = {}
         for n in needs:
             val = await conn.fetchval(
                 "SELECT COALESCE(SUM(amount),0) FROM quota_submissions WHERE reviewed=TRUE AND resource=$1 AND id>$2",
@@ -226,20 +232,28 @@ class QuotaCog(commands.Cog):
         embed = discord.Embed(
             title="✅ COMPLETED" if completed else f"Task: {task['name']}",
             colour=discord.Color.green() if completed else discord.Color.blue())
+
+        # overall progress
         total_need = sum(n["required"] for n in needs)
         total_have = sum(min(prog[n["resource"]], n["required"]) for n in needs)
-        embed.description = f"Progress **{total_have}/{total_need}**"
+        total_line = f"`{total_have:,}` / `{total_need:,}`\n" + self._bar(total_have, total_need)
+        embed.description = f"**Overall Progress**\n{total_line}"
 
+        # per-resource fields
+        embed.clear_fields()
         for n in needs:
-            have = min(prog[n["resource"]], n["required"])
-            embed.add_field(name=f"{n['resource'].title()}  {have}/{n['required']}",
-                            value=self._bar(have, n["required"]), inline=False)
+            res = n["resource"].title()
+            need = n["required"]
+            have = min(prog[n["resource"]], need)
+            line = f"`{have:,}` / `{need:,}`\n" + self._bar(have, need)
+            embed.add_field(name=res, value=line, inline=False)
 
         if lb:
-            embed.add_field(name="Top Contributors",
-                            value="\n".join(f"**{i+1}.** <@{r['user_id']}> `{r['total']}`"
-                                            for i, r in enumerate(lb)),
-                            inline=False)
+            body = "\n".join(
+                f"**{i+1}.** <@{r['user_id']}> `{r['total']:,}`"
+                for i, r in enumerate(lb)
+            )
+            embed.add_field(name="Top Contributors", value=body, inline=False)
 
         ch = self.bot.get_channel(PUBLIC_QUOTA_CH_ID)
         if ch:
@@ -266,7 +280,7 @@ class QuotaCog(commands.Cog):
     async def task_create(self, inter: discord.Interaction, name: str, details: str):
         await self._table_ready.wait()
         toks = re.sub(r"[,;:]", " ", details.lower()).split()
-        pairs: Dict[str,int] = {}
+        pairs: Dict[str, int] = {}
         cur: Optional[str] = None
         for tok in toks:
             if tok in RESOURCES:
@@ -280,7 +294,7 @@ class QuotaCog(commands.Cog):
 
         embed = discord.Embed(title=f"Task: {name}", colour=discord.Color.blue())
         for res, need in pairs.items():
-            embed.add_field(name=f"{res.title()}  0/{need}", value=self._bar(0, need), inline=False)
+            embed.add_field(name=f"{res.title()}  0/{need:,}", value=self._bar(0, need), inline=False)
 
         ch = self.bot.get_channel(PUBLIC_QUOTA_CH_ID)
         if not ch:
@@ -413,7 +427,7 @@ class QuotaCog(commands.Cog):
         if not rows:
             return await inter.response.send_message("No data yet.", ephemeral=True)
 
-        out = "\n".join(f"**{i+1}.** <@{r['user_id']}> `{r['total']}`"
+        out = "\n".join(f"**{i+1}.** <@{r['user_id']}> `{r['total']:,}`"
                         for i, r in enumerate(rows))
         await inter.response.send_message(out, ephemeral=True)
 
