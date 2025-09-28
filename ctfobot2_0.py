@@ -1439,6 +1439,7 @@ class ActionView(discord.ui.View):
 
             try:
                 await member.add_roles(*roles, reason="Application accepted")
+                inter.client.dispatch("member_form_accepted", member)
             except discord.Forbidden:
                 return await inter.response.send_message(
                     "Missing permissions to add roles.", ephemeral=True)
@@ -1732,6 +1733,7 @@ async def _run_bot():
     await (import_module("cogs.giveaways").setup)(bot, db)
     await (import_module("cogs.stats").setup)(bot, db)
     await (import_module("cogs.recruit_reminder").setup)(bot, db)
+    await (import_module("cogs.welcome_member").setup)(bot, db)
 
     await bot.start(BOT_TOKEN)
 
