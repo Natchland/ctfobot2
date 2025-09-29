@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -10,11 +11,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+log = logging.getLogger(__name__)
+
 RECRUIT_CHANNEL_ID  = 1421856820460388383
 RECRUITMENT_ROLE_ID = 1410659214959054988
 
-SHIFT_SECONDS   = 6 * 60 * 60
-UPDATE_INTERVAL = 15
+SHIFT_SECONDS   = 6 * 60 * 60      # 6-hour lockout
+UPDATE_INTERVAL = 15               # seconds
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS recruit_reminder (
@@ -40,6 +43,7 @@ class RecruitReminder(commands.Cog):
         self.update_message.start()
         asyncio.create_task(self._prepare_table())
 
+    # ────────────── DB helpers ──────────────
     async def _prepare_table(self):
         while self.db.pool is None:
             await asyncio.sleep(1)
@@ -68,20 +72,18 @@ class RecruitReminder(commands.Cog):
                 await conn.execute(CREATE_SQL)
                 await conn.execute(SET_SQL, message_id, claimed_by, end_ts)
 
+    # ────────────── VIEW / BUTTON ──────────────
     class AcceptView(discord.ui.View):
         def __init__(self, outer: "RecruitReminder"):
             super().__init__(timeout=None)
             self.outer = outer
 
-        @discord.ui.button(
-            label="Accept",
-            style=discord.ButtonStyle.success,
-            emoji="✅",
-            custom_id="recruit_accept"
-        )
-        async def accept(self, inter: discord.Interaction, _):
+        @discord.ui.button(label="Accept", emoji="✅", style=discord.ButtonStyle.success,
+                           custom_id="recruit_accept")
+        async def accept(self, inter: discord.Interaction,
+                         button: discord.ui.Button):                           # noqa: D401
             guild = inter.guild
-            role  = guild.get_role(RECRUITMENT_ROLE_ID)
+            role  = guild.get_role(RECRUITMENT_ROLE_ID) if guild else None
             if not (
                 inter.user.guild_permissions.administrator
                 or (role and role in inter.user.roles)
@@ -90,26 +92,36 @@ class RecruitReminder(commands.Cog):
                     "You’re not recruitment staff.", ephemeral=True
                 )
 
-            end_ts = int(datetime.now(timezone.utc).timestamp()) + SHIFT_SECONDS
-            await self.outer._set_state(
-                message_id=inter.message.id,
-                claimed_by=inter.user.id,
-                end_ts=end_ts
-            )
+            # respond immediately (defer) to avoid “interaction failed”
+            await inter.response.defer(ephemeral=True)
 
-            await inter.response.send_message("Shift accepted — thank you!", ephemeral=True)
+            try:
+                end_ts = int(datetime.now(timezone.utc).timestamp()) + SHIFT_SECONDS
+                await self.outer._set_state(
+                    message_id=inter.message.id,
+                    claimed_by=inter.user.id,
+                    end_ts=end_ts
+                )
 
-            for c in self.children:
-                c.disabled = True
+                for child in self.children:
+                    child.disabled = True
 
-            await inter.message.edit(
-                content=(
-                    f"✅ {inter.user.mention} has sent out recruitment — "
-                    f"next recruitment posts can be sent in **6 hours**."
-                ),
-                view=self
-            )
+                await inter.message.edit(
+                    content=(
+                        f"✅ {inter.user.mention} has sent out recruitment — "
+                        f"next recruitment posts can be sent in **6 hours**."
+                    ),
+                    view=self
+                )
+                await inter.followup.send("Shift accepted — thank you!", ephemeral=True)
+            except Exception as exc:  # log & inform but don’t crash the button
+                log.exception("Recruit Accept callback failed: %s", exc)
+                try:
+                    await inter.followup.send("Something went wrong – try again later.", ephemeral=True)
+                except discord.HTTPException:
+                    pass
 
+    # ────────────── PERIODIC UPDATER ──────────────
     @tasks.loop(seconds=UPDATE_INTERVAL)
     async def update_message(self):
         await self._table_ready.wait()
@@ -120,6 +132,7 @@ class RecruitReminder(commands.Cog):
 
         now_ts = int(datetime.now(timezone.utc).timestamp())
 
+        # no message stored → create new prompt
         if state["message_id"] is None:
             msg = await channel.send(
                 f"<@&{RECRUITMENT_ROLE_ID}> "
@@ -129,14 +142,15 @@ class RecruitReminder(commands.Cog):
             await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
             return
 
+        # fetch stored message – if missing, reset state
         try:
             msg = await channel.fetch_message(state["message_id"])
         except discord.NotFound:
             await self._set_state(message_id=None, claimed_by=None, end_ts=None)
             return
 
-        if state["end_ts"]:
-            if now_ts >= state["end_ts"]:
+        if state["end_ts"]:                                      # shift active
+            if now_ts >= state["end_ts"]:                        # expired → reset
                 await msg.edit(
                     content=(
                         f"<@&{RECRUITMENT_ROLE_ID}> "
@@ -145,7 +159,7 @@ class RecruitReminder(commands.Cog):
                     view=self.AcceptView(self)
                 )
                 await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
-            else:
+            else:                                                # still locked
                 remaining = state["end_ts"] - now_ts
                 hrs, rem  = divmod(remaining, 3600)
                 mins      = rem // 60
@@ -155,16 +169,18 @@ class RecruitReminder(commands.Cog):
                         f"next recruitment posts can be sent in **{hrs} h {mins:02} m**."
                     )
                 )
-        else:
+        else:                                                    # idle
             if not msg.components:
                 await msg.edit(view=self.AcceptView(self))
 
+    # ────────────── PERSIST VIEW ON RELOAD ──────────────
     @commands.Cog.listener()
     async def on_ready(self):
         state = await self._get_state()
         if state["message_id"]:
             self.bot.add_view(self.AcceptView(self), message_id=state["message_id"])
 
+    # ────────────── ADMIN COMMAND ──────────────
     @app_commands.command(name="recruitreset", description="Force-reset the recruitment reminder (admin only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def recruit_reset(self, inter: discord.Interaction):
