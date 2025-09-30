@@ -2,10 +2,15 @@
 # ──────────────────────────────────────────────────────────────────────
 #  ctfobot2.0.py   –  CTFO Discord bot / registration system
 # ──────────────────────────────────────────────────────────────────────
+
+from dotenv import load_dotenv
+load_dotenv()
+
 import os, sys, asyncio, signal, json, logging
 from datetime import datetime, timedelta, timezone, date
 from random import choice
 from typing import Dict, Any
+from db import Database
 
 import discord, asyncpg
 from discord import app_commands
@@ -21,9 +26,10 @@ logging.basicConfig(
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_URL    = os.getenv("DATABASE_URL")
-if not BOT_TOKEN or not DB_URL:
+DATABASE_URL    = os.getenv("DATABASE_URL")
+if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
+db = Database(DATABASE_URL)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,19 +38,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ══════════════════════════════════════════════════════════════════════
 #                             CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════
-BOT_TOKEN      = os.getenv("BOT_TOKEN")
-DATABASE_URL   = os.getenv("DATABASE_URL")
 GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
-ACTIVE_MEMBER_ROLE_ID = 1403337937722019931
 FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1378118620873494548
-WARNING_CH_ID  = 1398657081338237028
 WELCOME_CHANNEL_ID = 1398659438960971876
 APPLICATION_CH_ID  = 1378081331686412468
 UNCOMPLETED_APP_ROLE_ID = 1390143545066917931   # “Uncompleted application”
 COMPLETED_APP_ROLE_ID   = 1398708167525011568   # “Completed application”
-INACTIVE_ROLE_ID = 1416864151829221446          # “Inactive”  role
-INACTIVE_CH_ID   = 1416865404860502026          # #inactive-players channel
 RECRUITMENT_ID  = 1410659214959054988
 ACCEPT_ROLE_ID  = 1377075930144571452
 REGION_ROLE_IDS = {
@@ -67,9 +67,6 @@ GIVEAWAY_ROLE_ID    = 1403337937722019931
 GIVEAWAY_CH_ID      = 1413929735658016899
 CODES_CH_ID         = 1398667158237483138
 EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
-PROMOTE_STREAK      = 3
-INACTIVE_AFTER_DAYS = 5
-WARN_BEFORE_DAYS    = INACTIVE_AFTER_DAYS - 1
 
 ADMIN_ID        = 1377103244089622719
 ELECTRICIAN_ID  = 1380233234675400875
@@ -116,242 +113,6 @@ async def ensure_member_cache(guild: discord.Guild):
     if guild.large and len(guild._members) == 0:      # type: ignore
         # Force a guild chunk – this populates role.members
         await guild.chunk(cache=True)
-
-# ══════════════════════════════════════════════════════════════════════
-#                                DATABASE
-# ══════════════════════════════════════════════════════════════════════
-class Database:
-    def __init__(self, dsn: str):
-        self.dsn = dsn
-        self.pool: asyncpg.Pool | None = None
-
-    # ────────────────────────────────────────────────────────────────
-    #  CONNECTION / SCHEMA
-    # ────────────────────────────────────────────────────────────────
-    async def connect(self):
-        self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
-        await self.init_tables()
-
-    async def init_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-    CREATE TABLE IF NOT EXISTS codes (
-        name   TEXT PRIMARY KEY,
-        pin    VARCHAR(4) NOT NULL,
-        public BOOLEAN     NOT NULL DEFAULT FALSE
-    );
-    CREATE TABLE IF NOT EXISTS reviewers (user_id BIGINT PRIMARY KEY);
-    CREATE TABLE IF NOT EXISTS activity  (
-        user_id BIGINT PRIMARY KEY,
-        streak  INTEGER,
-        date    DATE,
-        warned  BOOLEAN,
-        last    TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS giveaways (
-        id         SERIAL PRIMARY KEY,
-        channel_id BIGINT,
-        message_id BIGINT,
-        prize      TEXT,
-        start_ts   BIGINT,
-        end_ts     BIGINT,
-        active     BOOLEAN,
-        note       TEXT
-    );
-    -- in case the column is missing on an old table:
-    ALTER TABLE giveaways
-        ADD COLUMN IF NOT EXISTS start_ts BIGINT;
-    
-    ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS note TEXT;
-
-    CREATE TABLE IF NOT EXISTS member_forms (
-        id         SERIAL PRIMARY KEY,
-        user_id    BIGINT,
-        created_at TIMESTAMP DEFAULT now(),
-        data       JSONB,
-        status     TEXT NOT NULL DEFAULT 'pending'
-    );
-    CREATE TABLE IF NOT EXISTS staff_applications (
-        id         SERIAL PRIMARY KEY,
-        user_id    BIGINT,
-        role       TEXT,
-        message_id BIGINT,
-        status     TEXT NOT NULL DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT now()
-    );
-    CREATE TABLE IF NOT EXISTS inactive_members (
-        user_id  BIGINT PRIMARY KEY,
-        until_ts BIGINT
-    );
-    ALTER TABLE member_forms
-        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
-    """)
-
-    # ────────────────────────────────────────────────────────────────
-    #  CODES helpers
-    # ────────────────────────────────────────────────────────────────
-    async def get_codes(self, *, only_public: bool = False):
-        q = "SELECT name, pin, public FROM codes"
-        if only_public:
-            q += " WHERE public=TRUE"
-        q += " ORDER BY name"
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(q)
-            return {r["name"]: (r["pin"], r["public"]) for r in rows}
-
-    async def add_code(self, name: str, pin: str, public: bool):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO codes (name, pin, public)
-                VALUES ($1,$2,$3)
-                ON CONFLICT(name) DO UPDATE SET pin=$2, public=$3
-                """,
-                name, pin, public
-            )
-
-    async def edit_code(self, name: str, pin: str, public: bool | None = None):
-        async with self.pool.acquire() as conn:
-            if public is None:
-                await conn.execute(
-                    "UPDATE codes SET pin=$2 WHERE name=$1",
-                    name, pin
-                )
-            else:
-                await conn.execute(
-                    "UPDATE codes SET pin=$2, public=$3 WHERE name=$1",
-                    name, pin, public
-                )
-
-    async def remove_code(self, name: str):
-        async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM codes WHERE name=$1", name)
-
-    # ────────────────────────────────────────────────────────────────
-    #  REVIEWERS
-    # ────────────────────────────────────────────────────────────────
-    async def get_reviewers(self):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT user_id FROM reviewers")
-            return {r["user_id"] for r in rows}
-
-    async def add_reviewer(self, uid: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO reviewers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                uid
-            )
-
-    async def remove_reviewer(self, uid: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
-
-    # ────────────────────────────────────────────────────────────────
-    #  ACTIVITY
-    # ────────────────────────────────────────────────────────────────
-    async def get_activity(self, uid: int):
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM activity WHERE user_id=$1", uid
-            )
-            return dict(row) if row else None
-
-    async def set_activity(self, uid, streak, date_, warned, last):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO activity (user_id, streak, date, warned, last)
-                VALUES ($1,$2,$3,$4,$5)
-                ON CONFLICT(user_id) DO UPDATE
-                  SET streak=$2, date=$3, warned=$4, last=$5
-                """,
-                uid, streak, date_, warned, last
-            )
-
-    async def get_all_activity(self):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM activity")
-            return {r["user_id"]: dict(r) for r in rows}
-        
-    # ───────────────── Inactive role helpers ─────────────────
-    async def add_inactive(self, uid: int, until_ts: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO inactive_members (user_id, until_ts) "
-                "VALUES ($1,$2) "
-                "ON CONFLICT (user_id) DO UPDATE SET until_ts=$2",
-                uid, until_ts
-            )
-
-    async def remove_inactive(self, uid: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM inactive_members WHERE user_id=$1", uid)
-
-    async def get_expired_inactive(self, now_ts: int):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM inactive_members WHERE until_ts <= $1",
-                now_ts
-            )
-            return [dict(r) for r in rows]
-
-    # ────────────────────────────────────────────────────────────────
-    #  MEMBER FORMS
-    # ────────────────────────────────────────────────────────────────
-    async def add_member_form(self, uid, data: dict, message_id: int = None):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO member_forms (user_id, data, message_id, status)
-                VALUES ($1,$2,$3,'pending')
-                """,
-                uid, json.dumps(data), message_id
-            )
-
-    async def update_member_form_status(self, message_id: int, status: str):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE member_forms SET status=$1 WHERE message_id=$2",
-                status, message_id
-            )
-
-    async def get_pending_member_forms(self):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT * FROM member_forms
-                WHERE status='pending' AND message_id IS NOT NULL
-            """)
-            return [dict(r) for r in rows]
-        
-    # ────────────────────────────────────────────────────────────────
-    #  STAFF APPLICATIONS
-    # ────────────────────────────────────────────────────────────────
-    async def add_staff_app(self, uid: int, role: str, msg_id: int):
-        """Insert a new staff-application row."""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO staff_applications (user_id, role, message_id)"
-                " VALUES ($1,$2,$3)",
-                uid, role, msg_id
-            )
-
-    async def update_staff_app_status(self, msg_id: int, status: str):
-        """Mark an application message as accepted / denied."""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE staff_applications SET status=$1 WHERE message_id=$2",
-                status, msg_id
-            )
-
-    async def get_pending_staff_apps(self):
-        """Return all still-pending staff applications."""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM staff_applications WHERE status='pending'"
-            )
-            return [dict(r) for r in rows]
-
-db = Database(DATABASE_URL)
 
 async def remove_duplicate_welcomes(channel: discord.TextChannel, user: discord.Member, welcome_marker: str):
     """
@@ -531,177 +292,6 @@ async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
     reviewers = await db.get_reviewers()
     return inter.user.guild_permissions.administrator or inter.user.id in reviewers
 
-# ═══════════════════════════  ACTIVITY TRACKER  ═══════════════════════
-async def mark_active(member: discord.Member):
-    """Record activity for a member and handle auto-promotion."""
-    if member.bot:
-        return
-
-    today = date.today()
-    rec = await db.get_activity(member.id)
-
-    if not rec:                                         # first-ever activity
-        streak, warned = 1, False
-    else:
-        if rec["date"] != today:                        # new calendar day
-            yesterday = rec["date"] + timedelta(days=1)
-            streak = rec["streak"] + 1 if yesterday == today else 1
-            warned = False                              # clear warning flag
-        else:                                           # same day, no change
-            streak, warned = rec["streak"], rec["warned"]
-
-    await db.set_activity(member.id, streak, today, warned,
-                          datetime.now(timezone.utc))
-
-    # ───────── PROMOTION ─────────
-    if streak >= PROMOTE_STREAK:
-        role = member.guild.get_role(ACTIVE_MEMBER_ROLE_ID)
-        if role and role not in member.roles:
-            try:
-                await member.add_roles(role, reason="Reached activity streak")
-                print(f"[PROMOTE] {member} promoted (streak {streak})")
-            except discord.Forbidden:
-                print(f"[PROMOTE] Missing perms to add role to {member}")
-
-@bot.event
-async def on_message(m: discord.Message):
-    if m.guild and not m.author.bot:
-        await mark_active(m.author)
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if (
-        member.guild.id == GUILD_ID
-        and not member.bot
-        and not before.channel
-        and after.channel
-    ):
-        await mark_active(member)
-
-@tasks.loop(hours=24)
-async def activity_maintenance() -> None:
-    """
-    Daily maintenance:
-      • promote / demote based on activity streak
-      • warn users about impending demotion
-      • kick users idle ≥14 days (unless exempt)
-      • auto-remove “Inactive” role when its period elapses and
-        reset that member’s activity so the kick timer restarts.
-    """
-    await bot.wait_until_ready()
-
-    guild = bot.get_guild(GUILD_ID)
-    role_active   = guild.get_role(ACTIVE_MEMBER_ROLE_ID) if guild else None
-    role_inactive = guild.get_role(INACTIVE_ROLE_ID)      if guild else None
-    warn_ch       = guild.get_channel(WARNING_CH_ID) if guild else None
-    today         = date.today()
-
-    if not guild or not role_active:
-        print("[activity] guild or Active-Member role missing – cycle skipped")
-        return
-
-    records  = await db.get_all_activity()        # {uid: dict}
-    promoted = demoted = warned_n = kicked = unmarked = 0
-
-    for uid, rec in records.items():
-        member = guild.get_member(uid)
-        if not member or member.bot:
-            continue
-
-        # ───────── PROMOTE ─────────
-        if rec["streak"] >= PROMOTE_STREAK and role_active not in member.roles:
-            try:
-                await member.add_roles(role_active, reason="Reached activity streak")
-                promoted += 1
-            except discord.Forbidden:
-                print(f"[PROMOTE] Missing perms for {member}")
-
-        # ───────── INACTIVITY CALCS ─────────
-        days_idle      = (today - rec["date"]).days
-        already_warned = rec["warned"]
-
-        # warn 1 day before demotion
-        if (
-            days_idle == WARN_BEFORE_DAYS
-            and role_active in member.roles
-            and not already_warned
-        ):
-            if warn_ch:
-                await warn_ch.send(
-                    f"{member.mention} You’ve been inactive for {days_idle} days — "
-                    "please pop in or you’ll lose your active member role."
-                )
-            await db.set_activity(uid, rec["streak"], rec["date"], True, rec["last"])
-            warned_n += 1
-
-        # demote after INACTIVE_AFTER_DAYS
-        if days_idle >= INACTIVE_AFTER_DAYS and role_active in member.roles:
-            try:
-                await member.remove_roles(role_active, reason="Inactive > 5 days")
-                demoted += 1
-            except discord.Forbidden:
-                print(f"[DEMOTE] Missing perms for {member}")
-            await db.set_activity(uid, 0, rec["date"], False, rec["last"])
-
-        # ───────── 14-DAY KICK (unless exempt) ─────────
-        
-        exempt = (
-            member.guild_permissions.administrator
-            or (role_inactive in member.roles if role_inactive else False)
-            or (role_active in member.roles)
-            or any(r.id in (GROUP_LEADER_ID, PLAYER_MGMT_ID, RECRUITMENT_ID, ADMIN_ID)
-                   for r in member.roles)            # ← Recruitment added
-        )
-
-        if not exempt and days_idle >= 14:
-            try:
-                await guild.kick(
-                    member,
-                    reason=f"Inactivity ≥14 days (last activity {rec['date']})"
-                )
-                kicked += 1
-                ch = guild.get_channel(INACTIVE_CH_ID)
-                if ch:
-                    await ch.send(f"👢 {member} was kicked for 14-day inactivity.")
-            except discord.Forbidden:
-                print(f"[KICK] Missing perms to kick {member}")
-
-    # ───────── Remove expired “Inactive” roles ─────────
-    now_ts  = int(datetime.now(timezone.utc).timestamp())
-    expired = await db.get_expired_inactive(now_ts)
-
-    for row in expired:                              # [{'user_id', 'until_ts'}]
-        member = guild.get_member(row["user_id"])
-        if not member:
-            await db.remove_inactive(row["user_id"])
-            continue
-
-        if role_inactive and role_inactive in member.roles:
-            try:
-                await member.remove_roles(role_inactive, reason="Inactive period elapsed")
-                unmarked += 1
-            except discord.Forbidden:
-                print(f"[INACTIVE] Can't remove role from {member}")
-
-        # reset activity so they start fresh
-        await db.set_activity(
-            member.id,               # uid
-            0,                       # streak
-            today,                   # date
-            False,                   # warned
-            datetime.now(timezone.utc)
-        )
-        await db.remove_inactive(member.id)
-
-        ch = guild.get_channel(INACTIVE_CH_ID)
-        if ch:
-            await ch.send(f"🔔 {member.mention} is no longer marked Inactive — welcome back!")
-
-    print(
-        f"[activity] cycle: +{promoted} promoted, "
-        f"{warned_n} warned, –{demoted} demoted, "
-        f"👢{kicked} kicked, 🔔{unmarked} inactive-role removed"
-    )
 # ============Welcome Message==============
 
 @bot.event
@@ -1012,79 +602,6 @@ async def resume_staff_applications():
             message_id=row["message_id"]
         )
         print(f"[resume_staff_apps] Restored view for {row['message_id']}")
-
-# ───────────────────────────── /inactive ─────────────────────────────
-# Anyone can run it; always applies to the caller them-self.
-PERIOD_CHOICES: list[tuple[str, int]] = [
-    ("1 week", 7),
-    ("2 weeks", 14),
-    ("1 month", 30),
-    ("2 months", 60),
-]
-
-@bot.tree.command(
-    name="inactive",
-    description="Mark yourself as temporarily inactive"
-)
-@app_commands.choices(
-    period=[app_commands.Choice(name=n, value=d) for n, d in PERIOD_CHOICES]
-)
-@app_commands.describe(
-    period="How long you will be inactive",
-    reason="Reason for inactivity (required)"
-)
-async def inactive_cmd(
-    inter:  discord.Interaction,
-    period: app_commands.Choice[int],
-    reason: str
-):
-    guild = inter.guild
-    if guild is None:                               # safety (shouldn’t happen)
-        return await inter.response.send_message(
-            "This command can only be used in a guild.", ephemeral=True
-        )
-
-    member   = guild.get_member(inter.user.id) or inter.user  # Member object
-    role     = guild.get_role(INACTIVE_ROLE_ID)
-    channel  = guild.get_channel(INACTIVE_CH_ID)
-
-    if role is None or channel is None:
-        return await inter.response.send_message(
-            "Inactive role or channel not configured.", ephemeral=True
-        )
-
-    until_ts = int(datetime.now(timezone.utc).timestamp()) + period.value * 86_400
-
-    # give role
-    try:
-        await member.add_roles(role, reason=f"Inactive – {reason} ({period.name})")
-    except discord.Forbidden:
-        return await inter.response.send_message(
-            "I don’t have permission to add that role.", ephemeral=True
-        )
-
-    # DB entry / update
-    await db.add_inactive(member.id, until_ts)
-
-    # log to channel
-    await channel.send(
-        embed=(
-            discord.Embed(
-                title="📴 Member marked Inactive",
-                description=(
-                    f"{member.mention} has set themselves to **Inactive** "
-                    f"for **{period.name}**.\n"
-                    f"**Reason:** {reason}"
-                ),
-                colour=discord.Color.light_gray(),
-            )
-            .set_footer(text=f"Until <t:{until_ts}:R>")
-        )
-    )
-
-    await inter.response.send_message(
-        f"You are now marked as inactive for **{period.name}**.", ephemeral=True
-    )
 
 # ══════════════════════════════════════════════════════════════════════
 #  LEAVE / BAN ANNOUNCEMENTS (no @mentions)
@@ -1720,9 +1237,6 @@ async def on_ready():
 
     bot.loop.create_task(listen_for_code_changes())
 
-    if not activity_maintenance.is_running():
-        activity_maintenance.start()
-
     print("Giveaways resumed – code-listener running")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1735,6 +1249,8 @@ async def _run_bot():
     await (import_module("cogs.recruit_reminder").setup)(bot, db)
     await (import_module("cogs.welcome_member").setup)(bot, db)
     await (import_module("cogs.quota").setup)(bot, db)
+    await (import_module("cogs.activity").setup)(bot, db)
+    await (import_module("cogs.todo").setup)(bot, db)
 
     await bot.start(BOT_TOKEN)
 

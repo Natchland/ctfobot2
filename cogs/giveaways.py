@@ -1,4 +1,7 @@
-# cogs/giveaways.py  –  production-ready giveaway cog  (2024-09-22)
+# cogs/giveaways.py  –  production-ready giveaway cog
+# Updated 2024-10-01
+# • Integrates To-Do list bonuses (+1 ticket / claim, max +3 per user)
+# • No other behaviour changed
 from __future__ import annotations
 
 import asyncio
@@ -11,12 +14,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-if TYPE_CHECKING:              # for type checkers only
+if TYPE_CHECKING:                 # import only for type-checkers
     from ctfobot2_0 import Database
 
 
 # ═════════════════════════════════════════════════════════════════════
-#                              CONSTANTS
+#                               CONSTANTS
 # ═════════════════════════════════════════════════════════════════════
 GUILD_ID            = 1377035207777194005
 GIVEAWAY_CHANNEL_ID = 1413929735658016899        # #giveaways
@@ -34,9 +37,11 @@ STREAK_BONUS_PER_SET = 3                         # +3 per full 3-day streak
 STAFF_BONUS_PER_WEEK = 1                         # +1 /week with staff role
 BOOST_BONUS_PER_WEEK = 2                         # +2 /week of Nitro boost
 
+TODO_BONUS_CAP       = 3                         # max +3 tickets per user
+
 
 # ═════════════════════════════════════════════════════════════════════
-#                              HELPERS
+#                                HELPERS
 # ═════════════════════════════════════════════════════════════════════
 def _fmt_left(td: dt.timedelta) -> str:
     sec = max(int(td.total_seconds()), 0)
@@ -65,12 +70,37 @@ async def _activity_map(pool: asyncpg.Pool) -> dict[int, dict]:
     return {r["user_id"]: dict(r) for r in rows}
 
 
+async def _todo_bonus_map(
+    pool: asyncpg.Pool, guild_id: int
+) -> dict[int, int]:
+    """
+    For every *open & claimable* To-Do task in the guild,
+    give +1 ticket to each claimant, capped to `TODO_BONUS_CAP`.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT claimed FROM todo_tasks
+         WHERE guild_id=$1
+           AND completed = FALSE
+           AND max_claims > 0
+        """,
+        guild_id,
+    )
+    bonus: dict[int, int] = {}
+    for r in rows:
+        for uid in r["claimed"]:
+            bonus[uid] = min(
+                TODO_BONUS_CAP, bonus.get(uid, 0) + 1
+            )  # hard cap
+    return bonus
+
+
 # ═════════════════════════════════════════════════════════════════════
-#                          Giveaway object
+#                             Giveaway object
 # ═════════════════════════════════════════════════════════════════════
 class Giveaway:
     """Keeps state for one running giveaway message."""
-    instances: Dict[int, "Giveaway"] = {}        # msg_id → instance
+    instances: Dict[int, "Giveaway"] = {}           # msg_id → instance
 
     def __init__(self, prize: str, ends_at: dt.datetime):
         self.prize      = prize
@@ -80,14 +110,17 @@ class Giveaway:
         self.message:  Optional[discord.Message] = None
         self.entrants: Dict[int, int]            = {}
 
-    # ──────────────────────────────────────────────────────────────
+    # ─────────────────────── ticket maths ───────────────────────
     async def _tickets_for(self, m: discord.Member,
                            activity: dict[int, dict]) -> int:
+        """
+        Base ticket calculation (without To-Do bonus).
+        """
         if ACTIVE_ROLE_ID not in [r.id for r in m.roles]:
             return 0
 
-        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-        tickets = 1                                               # base ticket
+        now      = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        tickets  = 1                                   # base ticket
 
         # activity streak bonus (capped to giveaway lifetime)
         if rec := activity.get(m.id):
@@ -100,26 +133,36 @@ class Giveaway:
             effective = max(m.premium_since, self.started_at)
             tickets += ((now - effective).days // 7) * BOOST_BONUS_PER_WEEK
 
-        # staff-role bonus
+        # staff bonus
         if any(r.id in STAFF_BONUS_ROLE_IDS for r in m.roles):
             tickets += ((now - self.started_at).days // 7) * STAFF_BONUS_PER_WEEK
 
         return tickets
 
     async def recompute(self, guild: discord.Guild, pool: asyncpg.Pool):
+        """
+        Rebuild the `entrants` dict (user_id → tickets).
+        """
         activity = await _activity_map(pool)
+        todo_bonus = await _todo_bonus_map(pool, guild.id)
+
         self.entrants.clear()
         for m in guild.members:
             if m.bot:
                 continue
-            n = await self._tickets_for(m, activity)
-            if n:
-                self.entrants[m.id] = n
+            tickets = await self._tickets_for(m, activity)
+            tickets += todo_bonus.get(m.id, 0)          # capped inside helper
+            if tickets:
+                self.entrants[m.id] = tickets
 
     # ─────────────────────────── embeds ───────────────────────────
-    def _embed(self, guild: discord.Guild,
-               *, ended=False,
-               winner: Optional[discord.Member] = None) -> discord.Embed:
+    def _embed(
+        self,
+        guild: discord.Guild,
+        *,
+        ended: bool = False,
+        winner: Optional[discord.Member] = None,
+    ) -> discord.Embed:
         e = discord.Embed(title="🎉 GIVEAWAY 🎉",
                           colour=discord.Color.blurple())
         e.add_field(name="Prize", value=f"**{self.prize}**", inline=False)
@@ -145,21 +188,30 @@ class Giveaway:
             listing = (
                 "\n".join(
                     f"• {guild.get_member(uid).mention} – **{t}**"
-                    for uid, t in sorted(self.entrants.items(),
-                                         key=lambda kv: (-kv[1], kv[0]))
+                    for uid, t in sorted(
+                        self.entrants.items(),
+                        key=lambda kv: (-kv[1], kv[0])
+                    )
                 )
                 or "*None yet*"
             )
             e.add_field(name="Eligible Entrants", value=listing, inline=False)
         return e
 
-    # ───────────────────── database helpers ──────────────────────
+    # ──────────────────── DB helpers ────────────────────
     async def _insert_row(self, pool: asyncpg.Pool, ch_id: int):
         await pool.execute(
-            "INSERT INTO giveaways (channel_id, message_id, prize, "
-            "start_ts, end_ts, active) VALUES ($1,$2,$3,$4,$5,TRUE)",
-            ch_id, self.message.id, self.prize,
-            int(self.started_at.timestamp()), int(self.ends_at.timestamp())
+            """
+            INSERT INTO giveaways
+              (channel_id, message_id, prize,
+               start_ts, end_ts, active)
+            VALUES ($1,$2,$3,$4,$5,TRUE)
+            """,
+            ch_id,
+            self.message.id,
+            self.prize,
+            int(self.started_at.timestamp()),
+            int(self.ends_at.timestamp()),
         )
 
     async def _close_row(self, pool: asyncpg.Pool,
@@ -167,10 +219,10 @@ class Giveaway:
         await pool.execute(
             "UPDATE giveaways SET active=FALSE, note=$1 WHERE message_id=$2",
             str(winner_id) if winner_id else "cancelled",
-            self.message.id
+            self.message.id,
         )
 
-    # ───────────────────── lifecycle helpers ─────────────────────
+    # ─────────────────── lifecycle ────────────────────
     async def start(self, ch: discord.TextChannel, pool: asyncpg.Pool):
         await self.recompute(ch.guild, pool)
         view = _GwButtons(self, pool)
@@ -182,8 +234,9 @@ class Giveaway:
         await self._close_row(pool, None)
         await self.message.edit(embed=self._embed(guild, ended=True), view=None)
 
-    async def draw(self, guild: discord.Guild,
-                   pool: asyncpg.Pool) -> Optional[discord.Member]:
+    async def draw(
+        self, guild: discord.Guild, pool: asyncpg.Pool
+    ) -> Optional[discord.Member]:
         await self.recompute(guild, pool)
         if not self.entrants:
             return None
@@ -193,7 +246,7 @@ class Giveaway:
 
 
 # ═════════════════════════════════════════════════════════════════════
-#                         Buttons (admin only)
+#                        Admin buttons (View)
 # ═════════════════════════════════════════════════════════════════════
 class _GwButtons(discord.ui.View):
     def __init__(self, gw: Giveaway, pool: asyncpg.Pool):
@@ -229,15 +282,15 @@ class _GwButtons(discord.ui.View):
 
 
 # ═════════════════════════════════════════════════════════════════════
-#                               COG
+#                                COG
 # ═════════════════════════════════════════════════════════════════════
 class GiveawayCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: Database):
         self.bot = bot
-        self.db  = db                     # keep full DB object
-        self._resume_started = False      # ensures resume runs once
+        self.db  = db
+        self._resume_started = False
 
-    # ───────────────────  slash command  ───────────────────
+    # ───────────────────────── slash command ─────────────────────────
     @app_commands.command(name="giveaway", description="Create a giveaway")
     @app_commands.describe(prize="Prize",
                            duration="Duration in hours (1-720)")
@@ -268,7 +321,7 @@ class GiveawayCog(commands.Cog):
 
         await inter.followup.send("Giveaway created!", ephemeral=True)
 
-    # ───────────── 5-second updater for one giveaway ─────────────
+    # ───────────────── 15-second updater loop ─────────────────
     def _background(self, gw: Giveaway):
         @tasks.loop(seconds=15)
         async def _loop():
@@ -295,10 +348,7 @@ class GiveawayCog(commands.Cog):
 
     # ───────────────────────── resume ─────────────────────────
     async def _resume(self):
-        """Re-attach views to active giveaways stored in the DB."""
         await self.bot.wait_until_ready()
-
-        # wait until the main on_ready finished opening the pool
         while self.db.pool is None:
             await asyncio.sleep(1)
 
@@ -324,8 +374,7 @@ class GiveawayCog(commands.Cog):
 
             gw = Giveaway(
                 r["prize"],
-                dt.datetime.fromtimestamp(r["end_ts"],
-                                          tz=dt.timezone.utc),
+                dt.datetime.fromtimestamp(r["end_ts"], tz=dt.timezone.utc),
             )
             gw.message = msg
             Giveaway.instances[msg.id] = gw
@@ -333,7 +382,6 @@ class GiveawayCog(commands.Cog):
             self._background(gw).start()
         print("[giveaways] resume finished")
 
-    # run _resume once, right after the first ready event
     @commands.Cog.listener()
     async def on_ready(self):
         if not self._resume_started:
@@ -342,7 +390,7 @@ class GiveawayCog(commands.Cog):
 
 
 # ═════════════════════════════════════════════════════════════════════
-#                           public entry point
+#                              ENTRY POINT
 # ═════════════════════════════════════════════════════════════════════
 async def setup(bot: commands.Bot, db: Database):
     """
