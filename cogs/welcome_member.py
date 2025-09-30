@@ -62,7 +62,9 @@ class WelcomeMember(commands.Cog):
             "- <#1414663176666222673> **In-Game Names - Make sure to post yours to avoid any confusion**\n"
             "- <#1413929735658016899> **Giveaways - Automatic entry for active members**\n"
             "- <#1416559771103924415> **Clan Guidelines & Support**\n"
-            "- <#1421945592522739824> **Quotas(New) - To improve clan progress and help with motivation**"
+            "- <#1421945592522739824> **Quotas - To improve clan progress and help with motivation**\n"
+            "- <#1422698527342989322> **To-Do Lists - To help keep members busy and more informed**"
+
         )
 
         await channel.send(
