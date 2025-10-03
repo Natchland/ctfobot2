@@ -1,51 +1,46 @@
-# Giveaways now in seperate file
-# ──────────────────────────────────────────────────────────────────────
-#  ctfobot2.0.py   –  CTFO Discord bot / registration system
-# ──────────────────────────────────────────────────────────────────────
+# ctfobot2_0.py – CTFO Discord bot (core launcher)
+# ───────────────────────────────────────────────────────────
+from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import sys
+from importlib import import_module
+
+import discord
+from discord.ext import commands
 from dotenv import load_dotenv
-load_dotenv()
 
-import os, sys, asyncio, signal, json, logging
-from datetime import datetime, timedelta, timezone, date
-from random import choice
-from typing import Dict, Any
 from db import Database
 
-import discord, asyncpg
-from discord import app_commands
-from discord.ext import commands, tasks
-from importlib import import_module
+# ══════════════════════ ENV + LOG ══════════════════════
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     stream=sys.stdout,
-    force=True,                 # override other basicConfig calls
+    force=True,
 )
 
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL    = os.getenv("DATABASE_URL")
+BOT_TOKEN    = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 if not BOT_TOKEN or not DATABASE_URL:
-    raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
+    raise RuntimeError("Set BOT_TOKEN and DATABASE_URL!")
+
 db = Database(DATABASE_URL)
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ══════════════════════ CONSTANTS (shared with cogs) ══════════════════════
+GUILD_ID = int(os.getenv("GUILD_ID", "1377035207777194005"))
 
-# ══════════════════════════════════════════════════════════════════════
-#                             CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════
-GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
-MEMBER_FORM_CH = 1378118620873494548
-WELCOME_CHANNEL_ID = 1398659438960971876
-APPLICATION_CH_ID  = 1378081331686412468
-UNCOMPLETED_APP_ROLE_ID = 1390143545066917931   # “Uncompleted application”
-COMPLETED_APP_ROLE_ID   = 1398708167525011568   # “Completed application”
-RECRUITMENT_ID  = 1410659214959054988
-ACCEPT_ROLE_ID  = 1377075930144571452
+WELCOME_CHANNEL_ID      = 1398659438960971876
+APPLICATION_CH_ID       = 1378081331686412468
+
+UNCOMPLETED_APP_ROLE_ID = 1390143545066917931
+COMPLETED_APP_ROLE_ID   = 1398708167525011568
+ACCEPT_ROLE_ID          = 1377075930144571452
+
 REGION_ROLE_IDS = {
     "North America": 1411364406096433212,
     "Europe":        1411364744484491287,
@@ -60,11 +55,11 @@ FOCUS_ROLE_IDS = {
     "PvP":          1408687710159245362,
 }
 
-
-TEMP_BAN_SECONDS    = 7 * 24 * 60 * 60
-GIVEAWAY_ROLE_ID    = 1403337937722019931
-GIVEAWAY_CH_ID      = 1413929735658016899
-EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
+#  giveaway / misc constants (still used by other cogs)
+TEMP_BAN_SECONDS  = 7 * 24 * 60 * 60
+GIVEAWAY_ROLE_ID  = 1403337937722019931
+GIVEAWAY_CH_ID    = 1413929735658016899
+EMBED_TITLE       = "🎉 GIVEAWAY 🎉"
 
 ADMIN_ID        = 1377103244089622719
 ELECTRICIAN_ID  = 1380233234675400875
@@ -74,935 +69,71 @@ TRUSTED_ID      = 1400584430900219935
 
 CODE_NAMES = ["Master", "Guest", "Electrician", "Other"]
 
-# staff roles that give weekly bonus tickets
 STAFF_BONUS_ROLE_IDS = {
     ADMIN_ID,
     GROUP_LEADER_ID,
     PLAYER_MGMT_ID,
-    RECRUITMENT_ID,
+    1410659214959054988,   # recruitment
 }
 
-BOOST_BONUS_PER_WEEK  = 3
-STAFF_BONUS_PER_WEEK  = 3
-STREAK_BONUS_PER_SET  = 3      # every 3-day set gives +3
+BOOST_BONUS_PER_WEEK = 3
+STAFF_BONUS_PER_WEEK = 3
+STREAK_BONUS_PER_SET = 3
 
-# ══════════════════════════════════════════════════════════════════════
-#                             BOT / INTENTS
-# ══════════════════════════════════════════════════════════════════════
-class CTFBot(commands.Bot):
-    last_anonymous_time: dict[int, datetime]
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.last_anonymous_time = {}
-
-# ── instantiate your custom bot ──
+# ══════════════════════ BOT INSTANCE ══════════════════════
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-bot = CTFBot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-async def ensure_member_cache(guild: discord.Guild):
-    """
-    Make sure the bot’s member cache is filled so role.members works.
-    Does nothing if the cache is already populated.
-    """
-    if guild.large and len(guild._members) == 0:      # type: ignore
-        # Force a guild chunk – this populates role.members
-        await guild.chunk(cache=True)
-
-async def remove_duplicate_welcomes(channel: discord.TextChannel, user: discord.Member, welcome_marker: str):
-    """
-    Delete duplicate welcome messages mentioning the user in the channel,
-    keeping only the most recent.
-    """
-    matches = []
-    async for message in channel.history(limit=20):
-        if (
-            message.author == channel.guild.me and
-            welcome_marker in message.content and
-            user.mention in message.content
-        ):
-            matches.append(message)
-    if len(matches) > 1:
-        matches.sort(key=lambda m: m.created_at, reverse=True)
-        for msg in matches[1:]:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-
-#================Resume member forms=====================
-async def resume_member_forms():
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        print("[resume_member_forms] Guild not found.")
-        return
-    channel = guild.get_channel(MEMBER_FORM_CH)
-    if not channel:
-        print("[resume_member_forms] Member form channel not found.")
-        return
-
-    forms = await db.get_pending_member_forms()
-    for form in forms:
-        msg_id = form.get("message_id")
-        raw = form.get("data") or {}
-        if isinstance(raw, str):
-            try:
-                data = json.loads(raw)
-            except Exception as e:
-                print(f"[resume_member_forms] Could not decode data: {raw} ({e})")
-                continue
-        else:
-            data = raw
-        region = data.get("region")
-        focus = data.get("focus")
-        user_id = form.get("user_id")
-        if not all([msg_id, region, focus, user_id]):
-            continue
-        try:
-            # Optionally: check if message still exists
-            await channel.fetch_message(msg_id)
-        except discord.NotFound:
-            print(f"[resume_member_forms] Message {msg_id} not found, skipping.")
-            continue
-        view = ActionView(guild, user_id, region, focus)
-        try:
-            bot.add_view(view, message_id=msg_id)
-            print(f"[resume_member_forms] Restored ActionView for form message {msg_id}")
-        except Exception as e:
-            print(f"[resume_member_forms] Error restoring view for {msg_id}: {e}")
-
+# ══════════════════════ GLOBAL SLASH-CMD ERROR ══════════════════════
 @bot.tree.error
-async def app_command_error(inter: discord.Interaction, error: Exception):
-    # shows *why* an interaction failed instead of silently timing-out
-    print("[app-cmd] exception:", type(error).__name__, error)
-    
-# ══════════════════════════════════════════════════════════════════════
-#                        UTILITIES  /  EMBEDS
-# ══════════════════════════════════════════════════════════════════════
-async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
-    reviewers = await db.get_reviewers()
-    return inter.user.guild_permissions.administrator or inter.user.id in reviewers
+async def app_command_error(inter: discord.Interaction, err: Exception):
+    print("[app-cmd] exception:", type(err).__name__, err)
 
-# ============Welcome Message==============
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    if member.bot:
-        return  # ignore bots
-
-    guild = member.guild
-    welcome = guild.get_channel(WELCOME_CHANNEL_ID)
-    apply_ch = guild.get_channel(APPLICATION_CH_ID)
-
-    # 1. Add uncompleted application role
-    role = guild.get_role(UNCOMPLETED_APP_ROLE_ID)
-    if role and role not in member.roles:
-        try:
-            await member.add_roles(role, reason="Joined – application not started")
-        except discord.Forbidden:
-            print(f"[JOIN] Missing perms to add role to {member}")
-        except Exception as e:
-            print(f"[JOIN] Error adding role: {e}")
-
-    # 2. Send welcome message and deduplicate
-    if welcome and apply_ch:
-        msg = (
-            f"👋 **Welcome {member.mention}!**\n"
-            f"To join CTFO, please run **`/memberform`** "
-            f"in {apply_ch.mention} and fill out the quick application.\n"
-            "If you have any questions, just ask a mod.  Enjoy your stay!"
-        )
-        try:
-            await welcome.send(msg)
-        except Exception as e:
-            print(f"[WELCOME] Error sending welcome message: {e}")
-        try:
-            await remove_duplicate_welcomes(welcome, member, "👋 **Welcome")
-        except Exception as e:
-            print(f"[WELCOME] Error deduplicating: {e}")
-    else:
-        print("Welcome or application channel missing!")
-
-# ══════════════════════════════════════════════════════════════════════
-#  STAFF APPLICATION SYSTEM  (persistent, button-paginated)
-# ══════════════════════════════════════════════════════════════════════
-from datetime import datetime, timezone
-
-# ───────────────────────  CONSTANTS  ───────────────────────
-STAFF_APPLICATION_CH_ID = 1410649548837093436      # channel where apps go
-ADMIN_ROLE_ID           = 1377103244089622719      # ping on new app
-
-STAFF_ROLE_IDS: dict[str, int] = {
-    "Group Leader":      1377077466513932338,
-    "Player Management": 1377084533706588201,
-    "Recruitment":       1410659214959054988,
-}
-
-# ───────────────────────  QUESTIONS  ───────────────────────
-# tuple = (label, style, required)  LABEL **≤45 chars**
-STAFF_QUESTION_SETS: dict[str, list[tuple[str, discord.TextStyle, bool]]] = {
-    "Group Leader": [
-        ("What group are you looking to lead?",          discord.TextStyle.short,     True),
-        ("Why do you want to be a group leader?",        discord.TextStyle.paragraph, True),
-        ("What makes you a good fit for this role?",     discord.TextStyle.paragraph, True),
-        ("How many Rust hours do you have?",             discord.TextStyle.short,     True),
-        ("How many hours a week are you available?",     discord.TextStyle.short,     True),
-        ("When are you most active?",                    discord.TextStyle.short,     True),
-        ("What time-zone are you in?",                   discord.TextStyle.short,     True),
-        ("How would you rate your in-game skills?",      discord.TextStyle.short,     True),
-        ("How old are you?",                             discord.TextStyle.short,     True),
-    ],
-
-    "Player Management": [
-        ("Why do you want to join player management?",        discord.TextStyle.paragraph, True),
-        ("What makes you good for this role?",                discord.TextStyle.paragraph, True),
-        ("Describe your leadership skills.",                  discord.TextStyle.paragraph, True),
-        ("How would you handle breaking of rules?",           discord.TextStyle.paragraph, True),
-        ("How would you handle an unpopular decision?",       discord.TextStyle.paragraph, True),
-        ("How would you handle an irritating player?",        discord.TextStyle.paragraph, True),
-        ("What would you do if you felt annoyed?",            discord.TextStyle.paragraph, True),
-        ("What time-zone are you in?",                        discord.TextStyle.short,     True),
-        ("How many hours a week are you active?",             discord.TextStyle.short,     True),
-        ("When are you most active?",                         discord.TextStyle.short,     True),
-        ("How old are you?",                                  discord.TextStyle.short,     True),
-    ],
-
-    "Recruitment": [
-        ("Why do you want this role?",                        discord.TextStyle.paragraph, True),
-        ("What time-zone are you in?",                        discord.TextStyle.short,     True),
-        ("When are you most active?",                         discord.TextStyle.short,     True),
-        ("Are you banned from any Rust discords?",            discord.TextStyle.short,     True),
-        ("How old are you?",                                  discord.TextStyle.short,     True),
-        ("If someone you rejected messages you, what do?",    discord.TextStyle.paragraph, True),
-    ],
-}
-
-# ───────────────────────  UI CLASSES  ───────────────────────
-class StaffRoleSelectView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self.add_item(StaffRoleSelect())
-
-class StaffRoleSelect(discord.ui.Select):
-    def __init__(self):
-        super().__init__(
-            placeholder="Select the staff role you’d like to apply for…",
-            options=[discord.SelectOption(label=r, value=r) for r in STAFF_QUESTION_SETS]
-        )
-
-    async def callback(self, inter: discord.Interaction):
-        await inter.response.send_modal(
-            StaffApplicationModal(self.values[0], 0, [])
-        )
-
-# ─────────────────────  Continue button  ─────────────────────
-class ContinueView(discord.ui.View):
-    def __init__(self, role: str, next_idx: int, collected: list[tuple[str, str]]):
-        super().__init__(timeout=300)
-        self.role, self.next_idx, self.collected = role, next_idx, collected
-
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="➡️")
-    async def continue_btn(self, inter: discord.Interaction, _):
-        await inter.response.send_modal(
-            StaffApplicationModal(self.role, self.next_idx, list(self.collected))
-        )
-        for c in self.children:
-            c.disabled = True
-        await inter.message.edit(view=self)
-
-# ─────────────────── multi-page modal (≤5 inputs) ───────────────────
-class StaffApplicationModal(discord.ui.Modal):
-    def __init__(self, role: str, idx: int, collected: list[tuple[str, str]]):
-        super().__init__(title=f"{role} Application")
-        self.role, self.idx, self.collected = role, idx, collected
-
-        qset = STAFF_QUESTION_SETS[role][idx : idx + 5]
-        for q, style, req in qset:
-            assert len(q) <= 45, f"Modal label >45 chars: {q}"
-            self.add_item(
-                discord.ui.TextInput(
-                    label=q,
-                    style=style,
-                    required=req,
-                    max_length=100 if style is discord.TextStyle.short else 4000
-                )
-            )
-
-    async def on_submit(self, inter: discord.Interaction):
-        # cache answers from this page
-        for comp in self.children:                                    # type: ignore
-            label_txt = getattr(comp, "label", None) or comp._underlying.label
-            self.collected.append((label_txt, comp.value))            # type: ignore
-
-        next_idx = self.idx + 5
-        if next_idx < len(STAFF_QUESTION_SETS[self.role]):
-            await inter.response.send_message(
-                "Page saved — click **Continue** to answer the next set:",
-                view=ContinueView(self.role, next_idx, list(self.collected)),
-                ephemeral=True
-            )
-            return
-
-        # ───────── all questions answered: build embed ─────────
-        review_ch = inter.guild.get_channel(STAFF_APPLICATION_CH_ID)
-        if not review_ch:
-            return await inter.response.send_message("Review channel missing.", ephemeral=True)
-
-        embed = (
-            discord.Embed(
-                title=f"{self.role} Application",
-                colour=discord.Color.orange(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            .set_author(name=str(inter.user), icon_url=inter.user.display_avatar.url)
-        )
-        for i, (q, a) in enumerate(self.collected, 1):
-            embed.add_field(name=f"{i}. {q}", value=a or "N/A", inline=False)
-        embed.set_footer(text=f"User ID: {inter.user.id}")
-
-        view = StaffApplicationActionView(inter.guild, inter.user.id, self.role)
-        msg  = await review_ch.send(f"<@&{ADMIN_ROLE_ID}>", embed=embed, view=view)
-
-        await db.add_staff_app(inter.user.id, self.role, msg.id)
-        await inter.response.send_message("✅ Your staff application was submitted.", ephemeral=True)
-
-# ─────────────────── reviewer action buttons ───────────────────
-class StaffApplicationActionView(discord.ui.View):
-    """
-    Persistent action-view attached to each staff-application message.
-    Re-attached on bot restart via resume_staff_applications().
-    """
-
-    def __init__(self, guild: discord.Guild, applicant_id: int, role: str):
-        super().__init__(timeout=None)                       # persistent view
-        self.guild: discord.Guild = guild
-        self.applicant_id: int = applicant_id
-        self.role: str = role
-
-    # ------------------------------------------------------------------ #
-    # helpers                                                            #
-    # ------------------------------------------------------------------ #
-    async def _authorised(self, member: discord.Member) -> bool:
-        return (
-            member.guild_permissions.administrator
-            or any(r.id in STAFF_ROLE_IDS.values() for r in member.roles)
-        )
-
-    async def _notify(self, txt: str):
-        user = await safe_fetch(self.guild, self.applicant_id)
-        if user:
-            try:
-                await user.send(txt)
-            except discord.Forbidden:
-                pass
-
-    async def _finish(self, inter: discord.Interaction, colour: discord.Colour):
-        emb = inter.message.embeds[0]
-        emb.colour = colour
-        for c in self.children:
-            c.disabled = True
-        await inter.message.edit(embed=emb, view=self)
-
-    # ------------------------------------------------------------------ #
-    # buttons                                                            #
-    # ------------------------------------------------------------------ #
-    @discord.ui.button(
-        label="Accept",
-        style=discord.ButtonStyle.success,
-        emoji="✅",
-        custom_id="staff_app_accept"               # <- required for persistence
-    )
-    async def accept(self, inter: discord.Interaction, _):
-        if not await self._authorised(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
-
-        applicant = await safe_fetch(self.guild, self.applicant_id)
-        if not applicant:
-            return await inter.response.send_message(
-                "Applicant left.", ephemeral=True
-            )
-
-        role_obj = self.guild.get_role(STAFF_ROLE_IDS[self.role])
-        if not role_obj:
-            return await inter.response.send_message(
-                "Role missing.", ephemeral=True
-            )
-
-        try:
-            await applicant.add_roles(
-                role_obj, reason="Staff application accepted"
-            )
-        except discord.Forbidden:
-            return await inter.response.send_message(
-                "Cannot add role.", ephemeral=True
-            )
-
-        await db.update_staff_app_status(inter.message.id, "accepted")
-        await inter.response.send_message(
-            f"{applicant.mention} accepted ✅", ephemeral=True
-        )
-        await self._finish(inter, discord.Color.green())
-        await self._notify(
-            f"🎉 You have been **accepted** as **{self.role}**!"
-        )
-
-    @discord.ui.button(
-        label="Deny",
-        style=discord.ButtonStyle.danger,
-        emoji="⛔",
-        custom_id="staff_app_deny"                 # <- required for persistence
-    )
-    async def deny(self, inter: discord.Interaction, _):
-        if not await self._authorised(inter.user):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True
-            )
-
-        await db.update_staff_app_status(inter.message.id, "denied")
-        await inter.response.send_message(
-            "Application denied ⛔", ephemeral=True
-        )
-        await self._finish(inter, discord.Color.red())
-        await self._notify(
-            f"❌ Your application for **{self.role}** was **denied**."
-        )
-
-# ──────────────────────  slash command  ──────────────────────
-@bot.tree.command(name="staffapply", description="Apply for a staff position")
-async def staffapply(inter: discord.Interaction):
-    await inter.response.send_message(
-        "Select the staff role you’d like to apply for:",
-        view=StaffRoleSelectView(),
-        ephemeral=True
-    )
-
-# ───────────── restore persistent views on reboot ─────────────
-async def resume_staff_applications():
-    guild = bot.get_guild(GUILD_ID)
-    if not guild: return
-    channel = guild.get_channel(STAFF_APPLICATION_CH_ID)
-    if not channel: return
-
-    for row in await db.get_pending_staff_apps():      # [{'user_id', 'role', 'message_id'}]
-        try:    await channel.fetch_message(row["message_id"])
-        except discord.NotFound: continue
-        bot.add_view(
-            StaffApplicationActionView(guild, row["user_id"], row["role"]),
-            message_id=row["message_id"]
-        )
-        print(f"[resume_staff_apps] Restored view for {row['message_id']}")
-
-# ══════════════════════════════════════════════════════════════════════
-#  LEAVE / BAN ANNOUNCEMENTS (no @mentions)
-# ══════════════════════════════════════════════════════════════════════
-
-LEAVE_BAN_CH_ID = 1404955868054814761   # change if you prefer a different channel
-
-@bot.event
-async def on_member_remove(member: discord.Member):
-    """
-    Fires when someone leaves the guild (voluntarily or kick).
-    """
-    channel = member.guild.get_channel(LEAVE_BAN_CH_ID)
-    if channel:
-        # member -> "Username#1234"
-        await channel.send(f"👋 **{member}** has left the server.")
-
-@bot.event
-async def on_member_ban(guild: discord.Guild, user: discord.User):
-    """
-    Fires when someone is banned. (Does NOT trigger for temp-bans placed
-    via the member-form deny, because that uses guild.ban and so will fire.)
-    """
-    channel = guild.get_channel(LEAVE_BAN_CH_ID)
-    if channel:
-        await channel.send(f"⛔ **{user}** has been banned from the server.")
-
-# ───────── Reviewer helper commands ─────────
-@bot.tree.command(name="addreviewer")
-async def add_reviewer(i: discord.Interaction, member: discord.Member):
-    if not i.user.guild_permissions.administrator:
-        await i.response.send_message("No permission.", ephemeral=True)
-        return
-    await db.add_reviewer(member.id)
-    await i.response.send_message("Added.", ephemeral=True)
-
-@bot.tree.command(name="removereviewer")
-async def remove_reviewer(i: discord.Interaction, member: discord.Member):
-    if not i.user.guild_permissions.administrator:
-        await i.response.send_message("No permission.", ephemeral=True)
-        return
-    await db.remove_reviewer(member.id)
-    await i.response.send_message("Removed.", ephemeral=True)
-
-@bot.tree.command(name="reviewers")
-async def list_reviewers(i: discord.Interaction):
-    reviewers = await db.get_reviewers()
-    txt = ", ".join(f"<@{u}>" for u in reviewers) or "None."
-    await i.response.send_message(txt, ephemeral=True)
-
-# ═══════════════════════ REGISTRATION WORKFLOW ════════════════════════
-
-def opts(*lbl: str) -> list[discord.SelectOption]:
-    """Helper to build SelectOption lists quickly."""
-    return [discord.SelectOption(label=l, value=l) for l in lbl]
-
-# ──────────────────────────── MemberRegistrationView ───────────────────────────
-class MemberRegistrationView(discord.ui.View):
-    """
-    First view the user sees.  Presents five dropdowns; when all are chosen
-    the Submit button appears (in a separate ephemeral message).
-    """
-    def __init__(self):
-        super().__init__(timeout=300)          # 5-minute timeout
-        self.data: Dict[str, str] = {}         # answers
-        self.user: discord.User | None = None  # who’s filling the form
-        self.start_msg:  discord.Message | None = None
-        self.submit_msg: discord.Message | None = None
-        self.submit_sent: bool = False
-
-    # -------------- Start button --------------
-    @discord.ui.button(label="Start Registration",
-                       style=discord.ButtonStyle.primary)
-    async def start(self, inter: discord.Interaction, _):
-        self.user = inter.user
-        self.clear_items()                     # remove the Start button
-        # add all dropdowns
-        self.add_item(SelectAge(self))
-        self.add_item(SelectRegion(self))
-        self.add_item(SelectBans(self))
-        self.add_item(SelectFocus(self))
-        self.add_item(SelectSkill(self))
-        # send the view back
-        await inter.response.send_message(
-            "Fill each dropdown – **Submit** appears when all done.",
-            view=self,
-            ephemeral=True
-        )
-        self.start_msg = await inter.original_response()
-
-# ───────────────────────── SubmitView (ephemeral, has one button) ──────────────
-class SubmitView(discord.ui.View):
-    def __init__(self, v: MemberRegistrationView):
-        super().__init__(timeout=300)
-        self.v = v
-
-    @discord.ui.button(label="Submit", style=discord.ButtonStyle.success)
-    async def submit(self, inter: discord.Interaction, _):
-        await inter.response.send_modal(FinalRegistrationModal(self.v))
-
-# ────────────────────────────── Base dropdown class ────────────────────────────
-class _BaseSelect(discord.ui.Select):
-    def __init__(self, v: MemberRegistrationView, key: str, **kw):
-        self.v, self.key = v, key
-        super().__init__(**kw)
-
-    async def callback(self, inter: discord.Interaction):
-        self.v.data[self.key] = self.values[0]      # store answer
-        self.placeholder = self.values[0]           # show selection
-        await inter.response.edit_message(view=self.v)
-
-        # if all required keys are present & Submit not yet shown → show it
-        if (not self.v.submit_sent
-                and all(k in self.v.data for k in
-                        ("age", "region", "bans", "focus", "skill"))):
-            self.v.submit_sent = True
-            self.v.submit_msg = await inter.followup.send(
-                "All set – click **Submit** :",
-                view=SubmitView(self.v),
-                ephemeral=True,
-                wait=True
-            )
-
-# ────────────────────── concrete dropdowns ──────────────────────
-class SelectAge(_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v, "age", placeholder="Age",
-        options=opts("12-14", "15-17", "18-21", "21+"))
-
-class SelectRegion(_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v, "region", placeholder="Region",
-        options=opts("North America", "Europe", "Asia", "Other"))
-
-class SelectBans(_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v, "bans", placeholder="Any bans?",
-        options=opts("Yes", "No"))
-
-class SelectFocus(_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v, "focus", placeholder="Main focus",
-        options=opts("PvP", "Farming", "Base Sorting",
-                     "Building", "Electricity"))
-
-class SelectSkill(_BaseSelect):
-    def __init__(self, v): super().__init__(
-        v, "skill", placeholder="Skill level",
-        options=opts("Beginner", "Intermediate", "Advanced", "Expert"))
-
-# ───────────────────────────── ActionView (Accept / Deny) ──────────────────────
-class ActionView(discord.ui.View):
-    """
-    Added to every embed posted in MEMBER_FORM_CH.
-    Lets reviewers accept or deny an applicant.
-    """
-    def __init__(self, guild: discord.Guild, uid: int, region: str, focus: str):
-        super().__init__(timeout=None)
-        self.guild, self.uid, self.region, self.focus = guild, uid, region, focus
-
-    # helper to fetch reviewers set (async!)
-    async def _reviewers(self) -> set[int]:
-        return await db.get_reviewers()
-
-    # -------------- Accept button --------------
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="memberform_accept")
-    async def accept(self, inter, _):
-        try:
-            if (inter.user.id not in await self._reviewers()
-                and not inter.user.guild_permissions.manage_roles):
-                return await inter.response.send_message(
-                    "Not authorised.", ephemeral=True)
-
-            # Fetch the member to accept
-            member = await safe_fetch(self.guild, self.uid)
-            if not member:
-                return await inter.response.send_message(
-                    "Member not found.", ephemeral=True)
-
-            # Collect all roles to add
-            roles = [
-                r for r in (
-                    self.guild.get_role(ACCEPT_ROLE_ID),
-                    self.guild.get_role(REGION_ROLE_IDS.get(self.region, 0)),
-                    self.guild.get_role(FOCUS_ROLE_IDS.get(self.focus, 0)),
-                ) if r
-            ]
-            if not roles:
-                return await inter.response.send_message(
-                    "Some roles are missing.", ephemeral=True)
-
-            try:
-                await member.add_roles(*roles, reason="Application accepted")
-                inter.client.dispatch("member_form_accepted", member)
-            except discord.Forbidden:
-                return await inter.response.send_message(
-                    "Missing permissions to add roles.", ephemeral=True)
-
-            # Remove application roles
-            try:
-                unc = self.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
-                comp = self.guild.get_role(COMPLETED_APP_ROLE_ID)
-                cleanup = [r for r in (unc, comp) if r and r in member.roles]
-                if cleanup:
-                    await member.remove_roles(*cleanup, reason="Application accepted")
-            except discord.Forbidden:
-                print(f"[ACCEPT] Can't remove app roles from {member}")
-
-            await inter.response.send_message(
-                f"{member.mention} accepted ✅", ephemeral=True)
-            await db.update_member_form_status(inter.message.id, "accepted")
-
-            # Change embed color to green
-            embed = inter.message.embeds[0]
-            embed.color = discord.Color.green()
-            await inter.message.edit(embed=embed)
-
-            # Disable buttons
-            for c in self.children:
-                c.disabled = True
-            await inter.message.edit(view=self)
-        except Exception as exc:
-            print(f"[ACCEPT BUTTON ERROR] {type(exc).__name__}: {exc}")
-            try:
-                if not inter.response.is_done():
-                    await inter.response.send_message(
-                        f"Error: {exc}", ephemeral=True)
-                else:
-                    await inter.followup.send(
-                        f"Error: {exc}", ephemeral=True)
-            except Exception as exc2:
-                print(f"Could not send error message: {exc2}")
-
-    # -------------- Deny button --------------
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔", custom_id="memberform_deny")
-    async def deny(self, inter: discord.Interaction, _):
-        if (inter.user.id not in await self._reviewers()
-                and not inter.user.guild_permissions.ban_members):
-            return await inter.response.send_message(
-                "Not authorised.", ephemeral=True)
-
-        member = await safe_fetch(self.guild, self.uid)
-        if not member:
-            return await inter.response.send_message(
-                "Member not found.", ephemeral=True)
-
-        await self.guild.ban(
-            member,
-            reason="Application denied – 7-day temp-ban",
-            delete_message_seconds=0
-        )
-        await inter.response.send_message(
-            f"{member.mention} denied ⛔", ephemeral=True)
-        await db.update_member_form_status(inter.message.id, "denied")
-
-        embed = inter.message.embeds[0]
-        embed.color = discord.Color.red()
-        await inter.message.edit(embed=embed)
-
-        for c in self.children:
-            c.disabled = True
-        await inter.message.edit(view=self)
-
-        # schedule unban
-        async def unban_later():
-            await asyncio.sleep(TEMP_BAN_SECONDS)
-            try:
-                await self.guild.unban(
-                    discord.Object(id=self.uid),
-                    reason="Temp ban expired"
-                )
-            except discord.HTTPException:
-                pass
-        asyncio.create_task(unban_later())
-# ───────────────────────── helper to fetch a member safely ─────────────────────
-async def safe_fetch(guild: discord.Guild, uid: int) -> discord.Member | None:
-    try:
-        return await guild.fetch_member(uid)
-    except (discord.NotFound, discord.HTTPException):
-        return None
-
-# ───────────────────────────── FinalRegistrationModal ──────────────────────────
-class FinalRegistrationModal(discord.ui.Modal):
-    """
-    Final modal that collects the long-answer questions and then posts the
-    embed for reviewers.
-    """
-    ban_expl: discord.ui.TextInput | None
-    gender:   discord.ui.TextInput | None
-    referral: discord.ui.TextInput | None
-
-    def __init__(self, v: MemberRegistrationView):
-        needs_ban = v.data.get("bans") == "Yes"
-        super().__init__(title="More Details" if needs_ban else "Additional Info")
-        self.v = v
-
-        # core fields
-        self.steam = discord.ui.TextInput(
-            label="Steam Profile Link",
-            placeholder="https://steamcommunity.com/…",
-            required=True
-        )
-        self.hours = discord.ui.TextInput(
-            label="Hours in Rust", required=True)
-        self.heard = discord.ui.TextInput(
-            label="Where did you hear about us?", required=True)
-
-        self.ban_expl = self.gender = self.referral = None
-
-        if needs_ban:
-            self.ban_expl = discord.ui.TextInput(
-                label="Ban Explanation",
-                style=discord.TextStyle.paragraph,
-                required=True
-            )
-            self.referral = discord.ui.TextInput(
-                label="Referral (optional)", required=False)
-            components = (
-                self.steam, self.hours, self.heard,
-                self.ban_expl, self.referral
-            )
-        else:
-            self.referral = discord.ui.TextInput(
-                label="Referral (optional)", required=False)
-            self.gender = discord.ui.TextInput(
-                label="Gender (optional)", required=False)
-            components = (
-                self.steam, self.hours, self.heard,
-                self.referral, self.gender
-            )
-
-        for c in components:
-            self.add_item(c)
-
-    # -------------------------- submit handler --------------------------
-    async def on_submit(self, inter: discord.Interaction):
-        d, user = self.v.data, (self.v.user or inter.user)
-
-        # ------------ build embed ------------
-        e = (
-            discord.Embed(
-                title="📋 NEW MEMBER REGISTRATION",
-                colour=discord.Color.gold(),
-                timestamp=inter.created_at
-            )
-            .set_author(name=str(user), icon_url=user.display_avatar.url)
-            .set_thumbnail(url=user.display_avatar.url)
-        )
-        e.add_field(name="\u200b", value="\u200b", inline=False)
-        e.add_field(name="👤 User",   value=user.mention, inline=False)
-        e.add_field(name="🔗 Steam",  value=self.steam.value, inline=False)
-        e.add_field(name="🗓️ Age",   value=d["age"],    inline=True)
-        e.add_field(name="🌍 Region", value=d["region"], inline=True)
-        e.add_field(name="🚫 Bans",   value=d["bans"],   inline=True)
-        if d["bans"] == "Yes" and self.ban_expl:
-            e.add_field(name="📝 Ban Explanation",
-                        value=self.ban_expl.value, inline=False)
-        e.add_field(name="🎯 Focus",  value=d["focus"], inline=True)
-        e.add_field(name="⭐ Skill",  value=d["skill"], inline=True)
-        e.add_field(name="⏱️ Hours", value=self.hours.value, inline=True)
-        e.add_field(name="📢 Heard about us",
-                    value=self.heard.value, inline=False)
-        e.add_field(name="🤝 Referral",
-                    value=self.referral.value if self.referral else "N/A",
-                    inline=True)
-        if self.gender:
-            e.add_field(name="⚧️ Gender",
-                        value=self.gender.value or "N/A",
-                        inline=True)
-        e.add_field(name="\u200b", value="\u200b", inline=False)
-
-        # ------------ DB save ------------
-        await db.add_member_form(user.id, {
-            "age": d["age"],
-            "region": d["region"],
-            "bans": d["bans"],
-            "ban_explanation": self.ban_expl.value if self.ban_expl else None,
-            "focus": d["focus"],
-            "skill": d["skill"],
-            "steam": self.steam.value,
-            "hours": self.hours.value,
-            "heard": self.heard.value,
-            "referral": self.referral.value if self.referral else None,
-            "gender": self.gender.value if self.gender else None
-        })
-
-        # ------------ swap application roles ------------
-        try:
-            applicant = await inter.guild.fetch_member(user.id)
-            unc = inter.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
-            comp = inter.guild.get_role(COMPLETED_APP_ROLE_ID)
-
-            if comp and comp not in applicant.roles:
-                await applicant.add_roles(
-                    comp, reason="Application submitted")
-            if unc and unc in applicant.roles:
-                await applicant.remove_roles(
-                    unc, reason="Application submitted")
-        except discord.Forbidden:
-            print(f"[FORM] Can't modify roles for {applicant}")
-
-        # ------------ send to reviewer channel ------------
-        form_msg = await inter.client.get_channel(MEMBER_FORM_CH).send(
-            embed=e,
-            view=ActionView(inter.guild, user.id,
-                            d["region"], d["focus"])
-        )
-        await db.add_member_form(
-            user.id,
-            {
-                "age": d["age"],
-                "region": d["region"],
-                "bans": d["bans"],
-                "ban_explanation": self.ban_expl.value if self.ban_expl else None,
-                "focus": d["focus"],
-                "skill": d["skill"],
-                "steam": self.steam.value,
-                "hours": self.hours.value,
-                "heard": self.heard.value,
-                "referral": self.referral.value if self.referral else None,
-                "gender": self.gender.value if self.gender else None
-            },
-            message_id=form_msg.id
-        )
-
-        # ------------ acknowledge user ------------
-        await inter.response.send_message(
-            "Registration submitted – thank you!", ephemeral=True
-        )
-
-        done = await inter.original_response()
-
-        # clean up ephemeral helper messages
-        async def tidy():
-            await asyncio.sleep(2)
-            for m in (self.v.start_msg, self.v.submit_msg, done):
-                try:
-                    if m:
-                        await m.delete()
-                except discord.HTTPException:
-                    pass
-        asyncio.create_task(tidy())
-
-# ───────────────────────────── /memberform slash command ───────────────────────
-@bot.tree.command(name="memberform", description="Start member registration")
-async def memberform(inter: discord.Interaction):
-    await inter.response.defer(ephemeral=True)
-    # Do slow work, then:
-    await inter.followup.send(
-        "Click below to begin registration:",
-        view=MemberRegistrationView(),
-        ephemeral=True
-    )
-
-# ════════════════════════ on_ready & startup ══════════════════════════
-import traceback
+# ══════════════════════ on_ready (only sync) ══════════════════════
 @bot.event
 async def on_ready():
-    await db.connect()
-
-    print(f"Logged in as {bot.user} ({bot.user.id})")
+    logging.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
     guild_obj = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
-    print("Slash-commands synced")
+    logging.info("Slash-commands synced")
 
-    await resume_member_forms()
-    await resume_staff_applications()
+# ══════════════════════ MAIN RUNNER ══════════════════════
+async def _run_bot() -> None:
+    # 1) DB connection (must exist before cogs query it)
+    await db.connect()
 
-    print("Giveaways resumed – code-listener running")
+    # 2) Load all cogs
+    for path in (
+        "cogs.giveaways",
+        "cogs.member_forms",        # new modular member-form system
+        "cogs.staff_applications",  # new modular staff-app system
+        "cogs.stats",
+        "cogs.recruit_reminder",
+        "cogs.welcome_general",
+        "cogs.welcome_member",
+        "cogs.quota",
+        "cogs.activity",
+        "cogs.todo",
+        "cogs.feedback",
+        "cogs.codes",
+    ):
+        await import_module(path).setup(bot, db)
 
-# ══════════════════════════════════════════════════════════════════════
-#  ENTRY POINTS  – safe for import OR direct execution
-# ══════════════════════════════════════════════════════════════════════
-async def _run_bot():
-
-    await (import_module("cogs.giveaways").setup)(bot, db)
-    await (import_module("cogs.stats").setup)(bot, db)
-    await (import_module("cogs.recruit_reminder").setup)(bot, db)
-    await (import_module("cogs.welcome_member").setup)(bot, db)
-    await (import_module("cogs.quota").setup)(bot, db)
-    await (import_module("cogs.activity").setup)(bot, db)
-    await (import_module("cogs.todo").setup)(bot, db)
-    await (import_module("cogs.feedback").setup)(bot, db)
-    await (import_module("cogs.codes").setup)(bot, db)
-
+    # 3) Start the bot
     await bot.start(BOT_TOKEN)
 
+# ══════════════════════ entry-point ══════════════════════
 def main() -> None:
-    """
-    • If called from a script with no running loop → starts asyncio.run().
-    • If called from code that is already inside a loop (FastAPI) →
-      schedules bot.start() on that loop.
-    """
-    if not BOT_TOKEN or not DATABASE_URL:
-        raise RuntimeError("Set BOT_TOKEN and DATABASE_URL environment variables!")
-
     try:
-        loop = asyncio.get_running_loop()   # are we already inside a loop?
-    except RuntimeError:
-        # No loop yet → normal CLI usage
         asyncio.run(_run_bot())
-    else:
-        # Loop exists → schedule bot.start() in background
-        loop.create_task(_run_bot())
+    except KeyboardInterrupt:
+        # graceful shutdown on Ctrl-C
+        logging.info("Bot stopped by user")
 
-# Standard guard so the bot still starts when executed directly
 if __name__ == "__main__":
     main()
