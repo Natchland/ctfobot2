@@ -278,7 +278,11 @@ class GiveawayCog(commands.Cog):
         await inter.followup.send("Giveaway created!", ephemeral=True)
 
     # ---------- manual entries sub-group ----------
-    entries_group = giveaway_group.group(name="entries", description="Manual ticket management")
+    entries_group = app_commands.Group(
+    name="entries",
+    description="Manual ticket management",
+    parent=giveaway_group      # << attach to /giveaway
+    )
 
     @entries_group.command(name="add", description="Add extra tickets for a user (admin)")
     @app_commands.describe(
