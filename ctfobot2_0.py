@@ -39,7 +39,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 #                             CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════
 GUILD_ID       = int(os.getenv("GUILD_ID", "1377035207777194005"))
-FEEDBACK_CH    = 1413188006499586158
 MEMBER_FORM_CH = 1378118620873494548
 WELCOME_CHANNEL_ID = 1398659438960971876
 APPLICATION_CH_ID  = 1378081331686412468
@@ -65,7 +64,6 @@ FOCUS_ROLE_IDS = {
 TEMP_BAN_SECONDS    = 7 * 24 * 60 * 60
 GIVEAWAY_ROLE_ID    = 1403337937722019931
 GIVEAWAY_CH_ID      = 1413929735658016899
-CODES_CH_ID         = 1398667158237483138
 EMBED_TITLE         = "🎉 GIVEAWAY 🎉"
 
 ADMIN_ID        = 1377103244089622719
@@ -183,110 +181,6 @@ async def app_command_error(inter: discord.Interaction, error: Exception):
     
 # ══════════════════════════════════════════════════════════════════════
 #                        UTILITIES  /  EMBEDS
-# ══════════════════════════════════════════════════════════════════════
-def build_codes_embed(codes: dict[str, tuple[str, bool]]) -> discord.Embed:
-    """
-    Build embed listing all codes.
-    codes = {name: (pin, public)}
-    """
-    e = discord.Embed(
-        title="🔑 Access Codes",
-        description="Codes with 🔒 are **private** (not returned by /codes list).",
-        colour=discord.Color.blue()
-    )
-    if not codes:
-        e.description += "\n\n*No codes configured yet.*"
-    else:
-        for name, (pin, pub) in codes.items():
-            lock = "" if pub else " 🔒"
-            e.add_field(name=f"{name}{lock}", value=f"`{pin}`", inline=False)
-    e.set_footer(text="Last updated")
-    return e
-
-
-async def update_codes_message(bot: commands.Bot, codes: dict) -> None:
-    """
-    Keep exactly ONE "🔑 Access Codes" embed in the codes channel.
-    If it exists, edit it; otherwise create it and remember the ID.
-    """
-    channel: discord.TextChannel | None = bot.get_channel(CODES_CH_ID)
-    if channel is None:
-        print("[codes] codes channel not found!")
-        return
-
-    store_path = "/data/codes_msg_id.txt"
-    msg_id: int | None = None
-
-    # ---------- 1) try stored ID ----------
-    if os.path.exists(store_path):
-        try:
-            msg_id = int(open(store_path, "r").read().strip())
-            msg = await channel.fetch_message(msg_id)
-        except (ValueError, discord.NotFound):
-            msg = None
-    else:
-        msg = None
-
-    # ---------- 2) search history if needed ----------
-    if msg is None:
-        async for m in channel.history(limit=100):
-            if (
-                m.author == bot.user                     # by this bot
-                and m.embeds
-                and m.embeds[0].title
-                and m.embeds[0].title.startswith("🔑 Access Codes")
-            ):
-                msg = m
-                msg_id = m.id
-                # rewrite the cache file so next time we fetch directly
-                os.makedirs("/data", exist_ok=True)
-                with open(store_path, "w") as fp:
-                    fp.write(str(msg_id))
-                break
-
-    embed = build_codes_embed(codes)
-
-    # ---------- 3) edit existing or send new ----------
-    if msg:
-        await msg.edit(embed=embed)
-    else:
-        msg = await channel.send(embed=embed)
-        os.makedirs("/data", exist_ok=True)
-        with open(store_path, "w") as fp:
-            fp.write(str(msg.id))
-
-    print(f"[codes] embed updated (message id {msg.id})")
-
-# ──────────────────────────────────────────────────────────────────────
-#  Background listener – refresh codes embed when DB sends NOTIFY
-# ──────────────────────────────────────────────────────────────────────
-async def listen_for_code_changes() -> None:
-    """
-    Dedicated connection LISTENing on ‘codes_changed’.
-    When a NOTIFY arrives, reload the table and refresh the embed.
-    """
-    conn: asyncpg.Connection = await asyncpg.connect(DATABASE_URL)
-
-    async def refresh_embed() -> None:
-        try:
-            codes = await db.get_codes()
-            await update_codes_message(bot, codes)
-            print(f"[codes_changed] embed refreshed at {datetime.utcnow()}")
-        except Exception as exc:
-            print("[codes_changed] error while refreshing embed:", exc)
-
-    async def _listener(*_):              # (conn, pid, channel, payload)
-        await refresh_embed()             # run directly; it’s already a coro
-
-    await conn.add_listener("codes_changed", _listener)
-    print("[codes_changed] listener attached")
-
-    try:
-        while not bot.is_closed():
-            await asyncio.sleep(3600)     # keep task alive
-    finally:
-        await conn.close()
-
 # ══════════════════════════════════════════════════════════════════════
 async def is_admin_or_reviewer(inter: discord.Interaction) -> bool:
     reviewers = await db.get_reviewers()
@@ -629,128 +523,6 @@ async def on_member_ban(guild: discord.Guild, user: discord.User):
     if channel:
         await channel.send(f"⛔ **{user}** has been banned from the server.")
 
-# ═══════════════════════════  /codes  COMMANDS  ═══════════════════════
-
-# ──────────────────────────────────────────────────────────────────────
-#  /generatecode  – get a random 4-digit pin (ephemeral)
-# ──────────────────────────────────────────────────────────────────────
-from random import randint
-
-@bot.tree.command(name="generatecode", description="Generate a random 4-digit code")
-async def generate_code(inter: discord.Interaction):
-    pin = str(randint(0, 9999)).zfill(4)   # always 4 digits, leading zeros allowed
-    await inter.response.send_message(
-        f"Your random code: `{pin}`",
-        ephemeral=True
-    )
-
-class CodesCog(commands.Cog):
-    def __init__(self, bot_, db_):
-        self.bot, self.db = bot_, db_
-
-    codes_group = app_commands.Group(
-        name="codes",
-        description="Manage / view access codes"
-    )
-
-    # ----------  /codes add  ----------
-    @codes_group.command(name="add", description="Add a new code")
-    @app_commands.describe(
-        name="Code name",
-        pin="4-digit number",
-        public="Visible to everyone with /codes list?"
-    )
-    async def codes_add(
-        self,
-        inter: discord.Interaction,
-        name: str,
-        pin: str,
-        public: bool = False
-    ):
-        if not await is_admin_or_reviewer(inter):
-            return await inter.response.send_message("Permission denied.",
-                                                     ephemeral=True)
-
-        codes = await self.db.get_codes()
-        if name in codes:
-            return await inter.response.send_message(
-                "A code with that name already exists. Use /codes edit.",
-                ephemeral=True
-            )
-        if not (pin.isdigit() and len(pin) == 4):
-            return await inter.response.send_message("PIN must be 4 digits.",
-                                                     ephemeral=True)
-
-        await self.db.add_code(name, pin, public)
-        await update_codes_message(self.bot, await self.db.get_codes())
-        await inter.response.send_message(
-            f"Added **{name}** (`{pin}`) {'(public)' if public else '(private)'}.",
-            ephemeral=True
-        )
-
-    # ----------  /codes edit  ----------
-    @codes_group.command(name="edit", description="Modify an existing code")
-    @app_commands.describe(
-        name="Existing code name",
-        pin="New 4-digit pin",
-        public="Leave blank to keep current visibility"
-    )
-    async def codes_edit(
-        self,
-        inter: discord.Interaction,
-        name: str,
-        pin: str,
-        public: bool | None = None
-    ):
-        if not await is_admin_or_reviewer(inter):
-            return await inter.response.send_message("Permission denied.",
-                                                     ephemeral=True)
-
-        codes = await self.db.get_codes()
-        if name not in codes:
-            return await inter.response.send_message("No such code.",
-                                                     ephemeral=True)
-        if not (pin.isdigit() and len(pin) == 4):
-            return await inter.response.send_message("PIN must be 4 digits.",
-                                                     ephemeral=True)
-
-        await self.db.edit_code(name, pin, public)
-        await update_codes_message(self.bot, await self.db.get_codes())
-        await inter.response.send_message("Code updated.", ephemeral=True)
-
-    # ----------  /codes remove  ----------
-    @codes_group.command(name="remove", description="Delete a code")
-    @app_commands.describe(name="Code name to remove")
-    async def codes_remove(self, inter: discord.Interaction, name: str):
-        if not await is_admin_or_reviewer(inter):
-            return await inter.response.send_message("Permission denied.",
-                                                     ephemeral=True)
-
-        codes = await self.db.get_codes()
-        if name not in codes:
-            return await inter.response.send_message("No such code.",
-                                                     ephemeral=True)
-
-        await self.db.remove_code(name)
-        await update_codes_message(self.bot, await self.db.get_codes())
-        await inter.response.send_message("Code removed.", ephemeral=True)
-
-    # ----------  /codes list  ----------
-    @codes_group.command(name="list", description="Show public codes")
-    async def codes_list(self, inter: discord.Interaction):
-        pub = await self.db.get_codes(only_public=True)
-        if not pub:
-            return await inter.response.send_message(
-                "No public codes currently.",
-                ephemeral=True
-            )
-        lines = [f"• **{n}**: `{pin}`" for n, (pin, _) in pub.items()]
-        await inter.response.send_message("\n".join(lines), ephemeral=True)
-
-
-codes_cog = CodesCog(bot, db)
-bot.tree.add_command(codes_cog.codes_group)
-
 # ───────── Reviewer helper commands ─────────
 @bot.tree.command(name="addreviewer")
 async def add_reviewer(i: discord.Interaction, member: discord.Member):
@@ -773,45 +545,6 @@ async def list_reviewers(i: discord.Interaction):
     reviewers = await db.get_reviewers()
     txt = ", ".join(f"<@{u}>" for u in reviewers) or "None."
     await i.response.send_message(txt, ephemeral=True)
-
-# ═══════════════════════════════ FEEDBACK ══════════════════════════════
-@bot.tree.command(name="feedback")
-@app_commands.describe(message="Your feedback", anonymous="Send anonymously?")
-async def feedback(inter: discord.Interaction, message: str, anonymous: bool):
-    ch = bot.get_channel(FEEDBACK_CH)
-    if not ch:
-        return await inter.response.send_message("Channel missing.", ephemeral=True)
-
-    now = datetime.now(timezone.utc)
-    last = bot.last_anonymous_time.get(inter.user.id)
-
-    if anonymous and last and now - last < timedelta(days=1):
-        rem = timedelta(days=1) - (now - last)
-        h, r = divmod(rem.seconds, 3600)
-        m, _ = divmod(r, 60)
-        return await inter.response.send_message(
-            f"One anonymous msg per 24 h. Retry in {rem.days} d {h} h {m} m.",
-            ephemeral=True,
-        )
-
-    if anonymous:
-        bot.last_anonymous_time[inter.user.id] = now
-        embed = (
-            discord.Embed(
-                title="Anonymous Feedback",
-                description=message,
-                colour=discord.Color.light_gray(),
-            ).set_footer(text="Sent anonymously")
-        )
-    else:
-        embed = (
-            discord.Embed(
-                title="Feedback", description=message, colour=discord.Color.blue()
-            ).set_author(name=str(inter.user), icon_url=inter.user.display_avatar.url)
-        )
-
-    await ch.send(embed=embed)
-    await inter.response.send_message("Thanks!", ephemeral=True)
 
 # ═══════════════════════ REGISTRATION WORKFLOW ════════════════════════
 
@@ -1230,12 +963,8 @@ async def on_ready():
     await bot.tree.sync(guild=guild_obj)
     print("Slash-commands synced")
 
-    await update_codes_message(bot, await db.get_codes())
-
     await resume_member_forms()
     await resume_staff_applications()
-
-    bot.loop.create_task(listen_for_code_changes())
 
     print("Giveaways resumed – code-listener running")
 
@@ -1251,6 +980,8 @@ async def _run_bot():
     await (import_module("cogs.quota").setup)(bot, db)
     await (import_module("cogs.activity").setup)(bot, db)
     await (import_module("cogs.todo").setup)(bot, db)
+    await (import_module("cogs.feedback").setup)(bot, db)
+    await (import_module("cogs.codes").setup)(bot, db)
 
     await bot.start(BOT_TOKEN)
 

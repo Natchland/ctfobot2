@@ -1,20 +1,14 @@
 # cogs/todo.py – Server-wide To-Do list
-# Production-ready · discord.py ≥ 2.3 · 2024-10-04
-#
-# • /todo add <title> <description> <claimable_slots>
-# • Global tasks (slots 0)  → Claim/Unclaim disabled, ✅ Complete
-# • Claimable tasks (1-3)  → 🙋 Claim · ↩️ Unclaim · ✅ Complete
-# • Per-user limit: 3 open claims
-# • Staff-only completion
-# • Adds column todo_tasks.title (auto, first run)
-# • All SQL uses ::bigint casts
-# ---------------------------------------------------------------------------
+# Works with discord.py ≥ 2.3  (persistent buttons)
+# -----------------------------------------------------------------------
 
 from __future__ import annotations
 
-import asyncio, logging
+import asyncio
+import contextlib
+import logging
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 
 import discord
 from discord import app_commands
@@ -23,40 +17,44 @@ from discord.ext import commands
 log = logging.getLogger("cog.todo")
 log.setLevel(logging.INFO)
 
-GUILD_ID       = 1377035207777194005
-TODO_CH_ID     = 1422698527342989322
-MAX_CLAIMS_CAP = 3
-DAILY_USER_CAP = 3
+# ───────────────────────── CONFIG ─────────────────────────
+GUILD_ID        = 1377035207777194005
+TODO_CH_ID      = 1422698527342989322
+MAX_CLAIMS_CAP  = 3         # slots per task
+DAILY_USER_CAP  = 3         # max open claims / user
+# ──────────────────────────────────────────────────────────
 
-# ═══════════════════════════════ COG ═══════════════════════════════
+
+# ═════════════════════════ COG ═══════════════════════════
 class TodoCog(commands.Cog):
+    """/todo commands, task embeds & claim / complete buttons."""
+
+    todo_group = app_commands.Group(name="todo", description="Server To-Do list")
+
+    # ─────────────── lifecycle ───────────────
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
+        self._started = False          # ensure on_ready runs once
 
-    # ----------------- life-cycle -----------------
-    async def cog_load(self):
-        """
-        Start a background coroutine that waits until the bot is ready,
-        then ensures the DB column exists and kicks off the sync task.
-        """
-        async def _post_login_setup():
-            await self.bot.wait_until_ready()
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self._started:
+            return
+        self._started = True
 
-            # wait for database connection initialised by your core bot
-            while self.db.pool is None:
-                await asyncio.sleep(1)
+        # wait for DB pool created by the core bot
+        while self.db.pool is None:
+            await asyncio.sleep(0.5)
 
-            # add `title` column once
-            await self.db.pool.execute(
-                "ALTER TABLE todo_tasks ADD COLUMN IF NOT EXISTS title TEXT"
-            )
+        # add the `title` column once (ignored if exists)
+        await self.db.pool.execute(
+            "ALTER TABLE todo_tasks ADD COLUMN IF NOT EXISTS title TEXT"
+        )
 
-            # start initial sync
-            asyncio.create_task(self._initial_sync())
+        await self._initial_sync()
+        log.info("TodoCog initialised")
 
-        asyncio.create_task(_post_login_setup())
-
-    # ----------------- EMBED -----------------
+    # ────────────── helpers ──────────────
     async def _embed(self, row: Dict[str, Any]) -> discord.Embed:
         title = row.get("title") or f"📝 Task #{row['id']}"
         e = discord.Embed(
@@ -77,8 +75,11 @@ class TodoCog(commands.Cog):
             e.set_footer(text="Global task – everyone can help")
         return e
 
-    # ----------------- message refresh -----------------
     async def _refresh_msg(self, guild: discord.Guild, task_id: int):
+        """
+        Create / update / delete the message for one task and attach a
+        persistent TaskView.
+        """
         row = await self.db.pool.fetchrow(
             "SELECT * FROM todo_tasks WHERE id=$1", task_id
         )
@@ -97,45 +98,42 @@ class TodoCog(commands.Cog):
 
         if row["completed"]:
             if msg:
-                try:
+                with contextlib.suppress(discord.Forbidden):
                     await msg.delete()
-                except discord.Forbidden:
-                    pass
             return
 
+        view = TaskView(self, task_id, row["max_claims"] > 0)
+
         if msg is None:
-            msg = await ch.send(embed=await self._embed(row))
+            msg = await ch.send(embed=await self._embed(row), view=view)
             await self.db.pool.execute(
                 "UPDATE todo_tasks SET message_id=$1 WHERE id=$2",
-                msg.id,
-                task_id,
+                msg.id, task_id
             )
+        else:
+            await msg.edit(embed=await self._embed(row), view=view)
 
-        await msg.edit(
-            embed=await self._embed(row),
-            view=TaskView(self, task_id, row["max_claims"] > 0),
-        )
+        # Register the view as persistent so it works after restarts
+        self.bot.add_view(view, message_id=msg.id)
 
-    # ----------------- startup catch-up -----------------
     async def _initial_sync(self):
+        """Refresh every still-open task when the bot starts."""
         guild = self.bot.get_guild(GUILD_ID)
         if not guild:
             return
-        for r in await self.db.list_open_todos(guild.id):
+
+        rows: List[Dict[str, Any]] = await self.db.list_open_todos(guild.id)
+        for r in rows:
             await self._refresh_msg(guild, r["id"])
-        log.info("[todo] initial sync finished (%s open tasks)",
-                 await self.db.pool.fetchval(
-                     "SELECT COUNT(*) FROM todo_tasks "
-                     "WHERE guild_id=$1 AND completed=FALSE", guild.id
-                 ))
 
-    # ═════════════ Slash-command group ═════════════
-    todo_group = app_commands.Group(name="todo", description="Server To-Do list")
+        log.info("[todo] initial sync finished – %s open tasks", len(rows))
 
-    @todo_group.command(name="add", description="Create a new task (staff)")
+    # ═══════════ SLASH COMMANDS ════════════
+    # /todo add ------------------------------------------------------
+    @todo_group.command(name="add", description="Create a new task (staff only)")
     @app_commands.describe(
-        title="Short task title",
-        description="Details / instructions",
+        title="Short title",
+        description="Task details / instructions",
         claimable_slots=f"0 = global • 1-{MAX_CLAIMS_CAP} = claimable slots",
     )
     async def todo_add(
@@ -149,15 +147,13 @@ class TodoCog(commands.Cog):
             return await inter.response.send_message("Staff only.", ephemeral=True)
 
         ch = inter.guild.get_channel(TODO_CH_ID)
-        if not ch:
+        if not isinstance(ch, discord.TextChannel):
             return await inter.response.send_message("Todo channel missing.", ephemeral=True)
 
         await inter.response.defer(ephemeral=True)
 
         placeholder = await ch.send(embed=discord.Embed(
-            title="Creating task …",
-            description=description,
-            colour=discord.Color.orange(),
+            title="Creating task …", description=description, colour=discord.Color.orange()
         ))
 
         await self.db.pool.execute(
@@ -167,49 +163,51 @@ class TodoCog(commands.Cog):
                    max_claims, message_id)
             VALUES ($1,$2,$3,$4,$5,$6)
             """,
-            inter.guild.id,
-            inter.user.id,
-            title,
-            description,
-            claimable_slots,
-            placeholder.id,
+            inter.guild.id, inter.user.id, title, description,
+            claimable_slots, placeholder.id,
         )
         task_id = await self.db.pool.fetchval(
             "SELECT id FROM todo_tasks WHERE message_id=$1", placeholder.id
         )
-        await self._refresh_msg(inter.guild, task_id)
 
+        await self._refresh_msg(inter.guild, task_id)
         await inter.followup.send(f"Task **#{task_id}** added.", ephemeral=True)
 
-    @todo_group.command(name="list", description="Show open tasks")
+    # /todo list -----------------------------------------------------
+    @todo_group.command(name="list", description="Show all open tasks")
     async def todo_list(self, inter: discord.Interaction):
         rows = await self.db.list_open_todos(inter.guild.id)
         if not rows:
-            return await inter.response.send_message(
-                "No open tasks – 🎉", ephemeral=True
-            )
+            return await inter.response.send_message("No open tasks – 🎉", ephemeral=True)
+
         txt = "\n".join(
             f"• **#{r['id']}** – {r.get('title') or r['description']}"
             for r in rows
         )
         await inter.response.send_message(txt[:1990], ephemeral=True)
 
-# ═══════════════════ VIEW (buttons) ═══════════════════
+
+# ═════════════════ VIEW (persistent buttons) ═════════════════
 class TaskView(discord.ui.View):
     def __init__(self, cog: TodoCog, task_id: int, claimable: bool):
         super().__init__(timeout=None)
         self.cog, self.task_id, self.claimable = cog, task_id, claimable
+
         if not claimable:
             for child in self.children:
-                if child.label in {"Claim", "Unclaim"}:
+                if child.custom_id in {"todo_claim", "todo_unclaim"}:
                     child.disabled = True
 
+    # helper
     async def _ack(self, inter: discord.Interaction, msg: str):
         await self.cog._refresh_msg(inter.guild, self.task_id)
         await inter.followup.send(msg, ephemeral=True)
 
-    # ---- Claim ----
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="🙋")
+    # ---- Claim -----------------------------------------------------
+    @discord.ui.button(
+        label="Claim", style=discord.ButtonStyle.primary,
+        emoji="🙋", custom_id="todo_claim"
+    )
     async def claim(self, inter: discord.Interaction, _):
         await inter.response.defer(ephemeral=True)
         if not self.claimable:
@@ -229,22 +227,28 @@ class TaskView(discord.ui.View):
         if not ok:
             return await self._ack(inter, "Already claimed or slots full.")
 
+        # user cap check
         if await self.cog.db.count_open_claims(inter.guild.id, inter.user.id) > DAILY_USER_CAP:
             await self.cog.db.pool.execute(
-                "UPDATE todo_tasks SET claimed = array_remove(claimed,$2::bigint)"
-                " WHERE id=$1",
+                "UPDATE todo_tasks "
+                "SET claimed = array_remove(claimed,$2::bigint) "
+                "WHERE id=$1",
                 self.task_id, inter.user.id,
             )
-            return await self._ack(inter, f"Claim limit ({DAILY_USER_CAP}) reached; reverted.")
+            return await self._ack(inter, f"Claim limit ({DAILY_USER_CAP}) reached – reverted.")
 
         await self._ack(inter, "Claimed!")
 
-    # ---- Unclaim ----
-    @discord.ui.button(label="Unclaim", style=discord.ButtonStyle.secondary, emoji="↩️")
+    # ---- Unclaim ---------------------------------------------------
+    @discord.ui.button(
+        label="Unclaim", style=discord.ButtonStyle.secondary,
+        emoji="↩️", custom_id="todo_unclaim"
+    )
     async def unclaim(self, inter: discord.Interaction, _):
         await inter.response.defer(ephemeral=True)
         if not self.claimable:
             return await self._ack(inter, "Global task – can't claim.")
+
         await self.cog.db.pool.execute(
             "UPDATE todo_tasks "
             "SET claimed = array_remove(claimed,$2::bigint) "
@@ -253,16 +257,20 @@ class TaskView(discord.ui.View):
         )
         await self._ack(inter, "Unclaimed.")
 
-    # ---- Complete ----
-    @discord.ui.button(label="Complete", style=discord.ButtonStyle.success, emoji="✅")
+    # ---- Complete --------------------------------------------------
+    @discord.ui.button(
+        label="Complete", style=discord.ButtonStyle.success,
+        emoji="✅", custom_id="todo_complete"
+    )
     async def complete(self, inter: discord.Interaction, _):
         await inter.response.defer(ephemeral=True)
         if not inter.user.guild_permissions.manage_guild:
             return await self._ack(inter, "Staff only.")
+
         await self.cog.db.complete_todo(self.task_id)
         await self._ack(inter, "Task completed!")
 
-# ═══════════════════ setup entry-point ═══════════════════
+
+# ═════════════ setup entry-point ═════════════
 async def setup(bot, db):
     await bot.add_cog(TodoCog(bot, db))
-    log.info("TodoCog loaded")
