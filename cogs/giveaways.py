@@ -1,11 +1,10 @@
 # cogs/giveaways.py  –  production-ready giveaway cog
-# Updated 2024-10-07
+# Updated 2024-10-08
 #
 # • To-Do bonuses (+1 / claim, cap +3)
-# • Admin “manual ticket” commands:
-#     /giveaway entries add|clear|list
-# • Start-timestamp is now restored on reboot → ticket totals persist.
-# • All original behaviour kept.
+# • Manual ticket commands  /giveaway entries add|clear|list
+# • NEW  /giveaway exclude add|remove|list   (hard-ban from giveaway)
+# • Start-timestamp restored on reboot → ticket totals persist.
 # --------------------------------------------------------------------
 
 from __future__ import annotations
@@ -20,16 +19,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:      # only for type-checkers
     from ctfobot2_0 import Database
 
 
-# ═════════════════════════════════ constants ═════════════════════════════════
+# ═════════════════════════════ constants ═════════════════════════════
 GUILD_ID            = 1377035207777194005
 GIVEAWAY_CHANNEL_ID = 1413929735658016899
 ACTIVE_ROLE_ID      = 1403337937722019931
 
-ADMIN_ROLE_IDS      = {1377103244089622719}
+ADMIN_ROLE_IDS = {1377103244089622719}
 
 STAFF_BONUS_ROLE_IDS = {
     1377077466513932338,
@@ -37,12 +36,12 @@ STAFF_BONUS_ROLE_IDS = {
     1410659214959054988,
 }
 
-STREAK_BONUS_PER_SET = 3    # +3 per full 3-day streak
-STAFF_BONUS_PER_WEEK = 1    # +1 /week with staff role
-BOOST_BONUS_PER_WEEK = 2    # +2 /week of Nitro boost
-TODO_BONUS_CAP       = 3    # per-user cap for todo claims
+STREAK_BONUS_PER_SET = 3
+STAFF_BONUS_PER_WEEK = 1
+BOOST_BONUS_PER_WEEK = 2
+TODO_BONUS_CAP       = 3
 
-# ═════════════════════════════════ SQL ═════════════════════════════════
+# ═════════════════════════════ SQL setup ═════════════════════════════
 CREATE_MANUAL_SQL = """
 CREATE TABLE IF NOT EXISTS giveaway_manual_entries (
     message_id BIGINT,
@@ -52,7 +51,15 @@ CREATE TABLE IF NOT EXISTS giveaway_manual_entries (
 );
 """
 
-# ═════════════════════════════ helpers ═════════════════════════════
+CREATE_EXCL_SQL = """
+CREATE TABLE IF NOT EXISTS giveaway_excluded (
+    message_id BIGINT,
+    user_id    BIGINT,
+    PRIMARY KEY (message_id, user_id)
+);
+"""
+
+# ═════════════════════════════ helper functions ═════════════════════════════
 def _fmt_left(td: dt.timedelta) -> str:
     sec = max(int(td.total_seconds()), 0)
     d, sec = divmod(sec, 86_400)
@@ -63,11 +70,11 @@ def _fmt_left(td: dt.timedelta) -> str:
     if m:  return f"{m}m {s}s"
     return f"{s}s"
 
-def _is_admin(mem: discord.Member) -> bool:
+def _is_admin(m: discord.Member) -> bool:
     return (
-        mem.guild_permissions.administrator
-        or mem.id == mem.guild.owner_id
-        or any(r.id in ADMIN_ROLE_IDS for r in mem.roles)
+        m.guild_permissions.administrator
+        or m.id == m.guild.owner_id
+        or any(r.id in ADMIN_ROLE_IDS for r in m.roles)
     )
 
 async def _activity_map(pool: asyncpg.Pool) -> dict[int, dict]:
@@ -93,18 +100,18 @@ async def _manual_bonus_map(pool: asyncpg.Pool, msg_id: int) -> dict[int, int]:
     )
     return {r["user_id"]: r["tickets"] for r in rows}
 
+async def _excluded_set(pool: asyncpg.Pool, msg_id: int) -> set[int]:
+    rows = await pool.fetch(
+        "SELECT user_id FROM giveaway_excluded WHERE message_id=$1", msg_id
+    )
+    return {r["user_id"] for r in rows}
+
 # ═════════════════════════════ Giveaway object ═════════════════════════════
 class Giveaway:
-    """In-memory state for one running giveaway."""
-    instances: Dict[int, "Giveaway"] = {}        # message_id → instance
+    instances: Dict[int, "Giveaway"] = {}          # message_id → instance
 
-    def __init__(
-        self,
-        prize: str,
-        ends_at: dt.datetime,
-        *,
-        started_at: Optional[dt.datetime] = None,
-    ):
+    def __init__(self, prize: str, ends_at: dt.datetime,
+                 *, started_at: Optional[dt.datetime] = None):
         self.prize      = prize
         self.ends_at    = ends_at
         self.started_at = started_at or dt.datetime.utcnow().replace(
@@ -120,7 +127,7 @@ class Giveaway:
             return 0
 
         now     = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-        tickets = 1  # base
+        tickets = 1
 
         if rec := act.get(m.id):
             days_since_start = (now.date() - self.started_at.date()).days + 1
@@ -137,34 +144,39 @@ class Giveaway:
         return tickets
 
     async def recompute(self, guild: discord.Guild, pool: asyncpg.Pool):
-        act         = await _activity_map(pool)
-        todo_bonus  = await _todo_bonus_map(pool, guild.id)
-        manual_bonus= await _manual_bonus_map(pool, self.message.id)
+        act      = await _activity_map(pool)
+        todo_b   = await _todo_bonus_map(pool, guild.id)
+        manual_b = await _manual_bonus_map(pool, self.message.id)
+        excl_set = await _excluded_set(pool, self.message.id)
 
         self.entrants.clear()
         for m in guild.members:
-            if m.bot:
+            if m.bot or m.id in excl_set:
                 continue
             t = await self._tickets_for(m, act)
-            t += todo_bonus.get(m.id, 0)
-            t += manual_bonus.get(m.id, 0)
+            t += todo_b.get(m.id, 0) + manual_b.get(m.id, 0)
             if t:
                 self.entrants[m.id] = t
 
-    # ───────────────── embed ─────────────────
+    # ───────────────── embeds ─────────────────
     def _embed(self, guild: discord.Guild,
-               *, ended=False, winner: Optional[discord.Member] = None) -> discord.Embed:
-        e = discord.Embed(title="🎉 GIVEAWAY 🎉", colour=discord.Color.blurple())
+               *, ended=False, winner: Optional[discord.Member]=None) -> discord.Embed:
+        e = discord.Embed(title="🎉 GIVEAWAY 🎉",
+                          colour=discord.Color.blurple())
         e.add_field(name="Prize", value=f"**{self.prize}**", inline=False)
 
         if ended:
             e.add_field(name="Time left", value="**Ended**", inline=False)
         else:
-            left = self.ends_at - dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-            e.add_field(name="Time left", value=f"**{_fmt_left(left)}**", inline=False)
+            left = self.ends_at - dt.datetime.utcnow().replace(
+                tzinfo=dt.timezone.utc
+            )
+            e.add_field(name="Time left", value=f"**{_fmt_left(left)}**",
+                        inline=False)
 
         e.add_field(name="Eligibility",
-                    value=f"Only <@&{ACTIVE_ROLE_ID}> can win.", inline=False)
+                    value=f"Only <@&{ACTIVE_ROLE_ID}> can win.",
+                    inline=False)
 
         if ended:
             e.add_field(name="Winner",
@@ -187,13 +199,11 @@ class Giveaway:
         await pool.execute(
             """
             INSERT INTO giveaways
-                  (channel_id, message_id, prize,
-                   start_ts,  end_ts, active)
+              (channel_id, message_id, prize,
+               start_ts, end_ts, active)
             VALUES ($1,$2,$3,$4,$5,TRUE)
             """,
-            ch_id,
-            self.message.id,
-            self.prize,
+            ch_id, self.message.id, self.prize,
             int(self.started_at.timestamp()),
             int(self.ends_at.timestamp()),
         )
@@ -208,8 +218,9 @@ class Giveaway:
     # ───────────────── lifecycle ─────────────────
     async def start(self, ch: discord.TextChannel, pool: asyncpg.Pool):
         await self.recompute(ch.guild, pool)
-        view = _GwButtons(self, pool)
-        self.message = await ch.send(embed=self._embed(ch.guild), view=view)
+        self.message = await ch.send(
+            embed=self._embed(ch.guild), view=_GwButtons(self, pool)
+        )
         Giveaway.instances[self.message.id] = self
         await self._insert_row(pool, ch.id)
 
@@ -217,15 +228,15 @@ class Giveaway:
         await self._close_row(pool, None)
         await self.message.edit(embed=self._embed(guild, ended=True), view=None)
 
-    async def draw(self, guild: discord.Guild, pool: asyncpg.Pool) -> Optional[discord.Member]:
+    async def draw(self, guild: discord.Guild,
+                   pool: asyncpg.Pool) -> Optional[discord.Member]:
         await self.recompute(guild, pool)
         if not self.entrants:
             return None
         ids, weights = zip(*self.entrants.items())
-        winner_id = random.choices(ids, weights)[0]
-        return guild.get_member(winner_id)
+        return guild.get_member(random.choices(ids, weights)[0])
 
-# ═════════════════════════════ Admin buttons ═════════════════════════════
+# ═════════════════════════════ admin buttons ═════════════════════════════
 class _GwButtons(discord.ui.View):
     def __init__(self, gw: Giveaway, pool: asyncpg.Pool):
         super().__init__(timeout=None)
@@ -233,19 +244,23 @@ class _GwButtons(discord.ui.View):
 
     async def interaction_check(self, inter: discord.Interaction) -> bool:
         if not _is_admin(inter.user):
-            await inter.response.send_message("Not authorised.", ephemeral=True)
+            await inter.response.send_message("Not authorised.",
+                                              ephemeral=True)
             return False
         return True
 
-    @discord.ui.button(label="🎁 End & Draw", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🎁 End & Draw",
+                       style=discord.ButtonStyle.green)
     async def _end(self, inter: discord.Interaction, _):
         winner = await self.gw.draw(inter.guild, self.pool)
         await self.gw._close_row(self.pool, winner.id if winner else None)
-        await self.gw.message.edit(embed=self.gw._embed(inter.guild, True, winner),
-                                   view=None)
+        await self.gw.message.edit(
+            embed=self.gw._embed(inter.guild, True, winner), view=None
+        )
         if winner:
             await inter.channel.send(
-                f"🎉 Congratulations {winner.mention}! You won **{self.gw.prize}**!"
+                f"🎉 Congratulations {winner.mention}! "
+                f"You won **{self.gw.prize}**!"
             )
         await inter.response.send_message("Giveaway ended.", ephemeral=True)
 
@@ -254,13 +269,13 @@ class _GwButtons(discord.ui.View):
         await self.gw.cancel(inter.guild, self.pool)
         await inter.response.send_message("Cancelled.", ephemeral=True)
 
-# ═════════════════════════════ COG ═════════════════════════════
+# ═════════════════════════════ Cog ═════════════════════════════
 class GiveawayCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: Database):
         self.bot, self.db = bot, db
         self._resume_started = False
 
-    # ───────────── Slash commands ─────────────
+    # ───────────── main slash group ─────────────
     giveaway_group = app_commands.Group(name="giveaway", description="Giveaway tools")
 
     @giveaway_group.command(name="create", description="Create a giveaway")
@@ -286,31 +301,27 @@ class GiveawayCog(commands.Cog):
 
         await inter.followup.send("Giveaway created!", ephemeral=True)
 
-    # ----- manual ticket sub-commands -----
+    # ═════════ manual ticket sub-group ═════════
     entries_group = app_commands.Group(
-        name="entries",
-        description="Manual ticket management",
+        name="entries", description="Manual ticket management",
         parent=giveaway_group
     )
 
-    @entries_group.command(name="add", description="Add extra tickets for a user (admin)")
+    @entries_group.command(name="add", description="Add extra tickets for a user")
     @app_commands.describe(
-        giveaway="Message link or ID of the giveaway",
-        user="Member to reward",
-        tickets="Number of tickets to add (1-100)"
+        giveaway="Message link or ID",
+        user="Member",
+        tickets="Tickets to add (1-100)"
     )
-    async def entries_add(
-        self, inter: discord.Interaction,
-        giveaway: str,
-        user: discord.Member,
-        tickets: app_commands.Range[int, 1, 100]
-    ):
+    async def entries_add(self, inter: discord.Interaction,
+                          giveaway: str, user: discord.Member,
+                          tickets: app_commands.Range[int, 1, 100]):
         if not _is_admin(inter.user):
             return await inter.response.send_message("Admins only.", ephemeral=True)
 
         msg_id = _extract_msg_id(giveaway)
         if msg_id is None:
-            return await inter.response.send_message("Invalid message link / ID.", ephemeral=True)
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
 
         await self.db.pool.execute(CREATE_MANUAL_SQL)
         await self.db.pool.execute(
@@ -320,25 +331,21 @@ class GiveawayCog(commands.Cog):
             ON CONFLICT (message_id,user_id) DO UPDATE SET tickets=$3
             """, msg_id, user.id, tickets
         )
-        await inter.response.send_message(
-            f"Added **{tickets}** tickets for {user.mention}.", ephemeral=True)
+        await inter.response.send_message(f"Set **{tickets}** tickets for {user.mention}.", ephemeral=True)
 
         if gw := Giveaway.instances.get(msg_id):
             await gw.recompute(inter.guild, self.db.pool)
             await gw.message.edit(embed=gw._embed(inter.guild))
 
-    @entries_group.command(name="clear", description="Remove manual tickets (admin)")
-    async def entries_clear(
-        self, inter: discord.Interaction,
-        giveaway: str,
-        user: discord.Member,
-    ):
+    @entries_group.command(name="clear", description="Remove manual tickets for a user")
+    async def entries_clear(self, inter: discord.Interaction,
+                            giveaway: str, user: discord.Member):
         if not _is_admin(inter.user):
             return await inter.response.send_message("Admins only.", ephemeral=True)
 
         msg_id = _extract_msg_id(giveaway)
         if msg_id is None:
-            return await inter.response.send_message("Invalid message link / ID.", ephemeral=True)
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
 
         await self.db.pool.execute(CREATE_MANUAL_SQL)
         await self.db.pool.execute(
@@ -351,14 +358,15 @@ class GiveawayCog(commands.Cog):
             await gw.recompute(inter.guild, self.db.pool)
             await gw.message.edit(embed=gw._embed(inter.guild))
 
-    @entries_group.command(name="list", description="List manual tickets (admin)")
-    async def entries_list(self, inter: discord.Interaction, giveaway: str):
+    @entries_group.command(name="list", description="List manual tickets for a giveaway")
+    async def entries_list(self, inter: discord.Interaction,
+                           giveaway: str):
         if not _is_admin(inter.user):
             return await inter.response.send_message("Admins only.", ephemeral=True)
 
         msg_id = _extract_msg_id(giveaway)
         if msg_id is None:
-            return await inter.response.send_message("Invalid message link / ID.", ephemeral=True)
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
 
         await self.db.pool.execute(CREATE_MANUAL_SQL)
         rows = await self.db.pool.fetch(
@@ -368,10 +376,83 @@ class GiveawayCog(commands.Cog):
         if not rows:
             return await inter.response.send_message("No manual entries.", ephemeral=True)
 
-        lines = [f"• <@{r['user_id']}> – **{r['tickets']}**" for r in rows]
-        await inter.response.send_message("\n".join(lines), ephemeral=True)
+        txt = "\n".join(f"• <@{r['user_id']}> – **{r['tickets']}**" for r in rows)
+        await inter.response.send_message(txt, ephemeral=True)
 
-    # ───────────── 15-sec background loop ─────────────
+    # ═════════ exclude (ban) sub-group ═════════
+    exclude_group = app_commands.Group(
+        name="exclude", description="Ban / unban participants",
+        parent=giveaway_group
+    )
+
+    @exclude_group.command(name="add", description="Ban a member from this giveaway")
+    async def exclude_add(self, inter: discord.Interaction,
+                          giveaway: str, user: discord.Member):
+        if not _is_admin(inter.user):
+            return await inter.response.send_message("Admins only.", ephemeral=True)
+
+        msg_id = _extract_msg_id(giveaway)
+        if msg_id is None:
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
+
+        await self.db.pool.execute(CREATE_EXCL_SQL)
+        await self.db.pool.execute(
+            "INSERT INTO giveaway_excluded (message_id, user_id) VALUES ($1,$2) "
+            "ON CONFLICT DO NOTHING", msg_id, user.id
+        )
+        # also delete manual tickets if any
+        await self.db.pool.execute(
+            "DELETE FROM giveaway_manual_entries WHERE message_id=$1 AND user_id=$2",
+            msg_id, user.id
+        )
+        await inter.response.send_message(f"{user.mention} is now excluded.", ephemeral=True)
+
+        if gw := Giveaway.instances.get(msg_id):
+            await gw.recompute(inter.guild, self.db.pool)
+            await gw.message.edit(embed=gw._embed(inter.guild))
+
+    @exclude_group.command(name="remove", description="Unban a member")
+    async def exclude_remove(self, inter: discord.Interaction,
+                             giveaway: str, user: discord.Member):
+        if not _is_admin(inter.user):
+            return await inter.response.send_message("Admins only.", ephemeral=True)
+
+        msg_id = _extract_msg_id(giveaway)
+        if msg_id is None:
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
+
+        await self.db.pool.execute(CREATE_EXCL_SQL)
+        await self.db.pool.execute(
+            "DELETE FROM giveaway_excluded WHERE message_id=$1 AND user_id=$2",
+            msg_id, user.id
+        )
+        await inter.response.send_message(f"{user.mention} re-added to giveaway.", ephemeral=True)
+
+        if gw := Giveaway.instances.get(msg_id):
+            await gw.recompute(inter.guild, self.db.pool)
+            await gw.message.edit(embed=gw._embed(inter.guild))
+
+    @exclude_group.command(name="list", description="List currently banned users")
+    async def exclude_list(self, inter: discord.Interaction, giveaway: str):
+        if not _is_admin(inter.user):
+            return await inter.response.send_message("Admins only.", ephemeral=True)
+
+        msg_id = _extract_msg_id(giveaway)
+        if msg_id is None:
+            return await inter.response.send_message("Bad link / ID.", ephemeral=True)
+
+        await self.db.pool.execute(CREATE_EXCL_SQL)
+        rows = await self.db.pool.fetch(
+            "SELECT user_id FROM giveaway_excluded WHERE message_id=$1", msg_id
+        )
+        if not rows:
+            return await inter.response.send_message("No one is excluded.", ephemeral=True)
+
+        await inter.response.send_message(
+            "\n".join(f"• <@{r['user_id']}>" for r in rows), ephemeral=True
+        )
+
+    # ───────────── 15-sec updater loop ─────────────
     def _background(self, gw: Giveaway):
         @tasks.loop(seconds=15)
         async def _loop():
@@ -390,6 +471,7 @@ class GiveawayCog(commands.Cog):
 
             await gw.recompute(gw.message.guild, self.db.pool)
             await gw.message.edit(embed=gw._embed(gw.message.guild))
+
         return _loop
 
     # ───────────── resume on reboot ─────────────
@@ -399,6 +481,7 @@ class GiveawayCog(commands.Cog):
             await asyncio.sleep(1)
 
         await self.db.pool.execute(CREATE_MANUAL_SQL)
+        await self.db.pool.execute(CREATE_EXCL_SQL)
 
         guild = self.bot.get_guild(GUILD_ID)
         if not guild:
@@ -414,7 +497,7 @@ class GiveawayCog(commands.Cog):
             except discord.NotFound:
                 await self.db.pool.execute(
                     "UPDATE giveaways SET active=FALSE WHERE message_id=$1",
-                    r["message_id"],
+                    r["message_id"]
                 )
                 continue
 
