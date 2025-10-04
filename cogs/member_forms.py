@@ -327,17 +327,15 @@ class ActionView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild, self.uid, self.region, self.focus, self.db = guild, uid, region, focus, db
 
-    # ---------- helpers ----------
     async def _reviewers(self) -> set[int]:
         return await self.db.get_reviewers()
 
     async def _finish(self, i: discord.Interaction, txt: str, colour: discord.Colour):
         emb = i.message.embeds[0]
         emb.colour = colour
-        await i.message.edit(embed=emb)
         for c in self.children:
             c.disabled = True
-        await i.message.edit(view=self)
+        await i.message.edit(embed=emb, view=self)
         await i.response.send_message(txt, ephemeral=True)
 
     # ---------- Accept ----------
@@ -358,15 +356,6 @@ class ActionView(discord.ui.View):
         with contextlib.suppress(discord.Forbidden):
             if roles:
                 await mem.add_roles(*roles, reason="Application accepted")
-
-        unc = self.guild.get_role(UNCOMPLETED_APP_ROLE_ID)
-        comp = self.guild.get_role(COMPLETED_APP_ROLE_ID)
-        if comp and comp not in mem.roles:
-            with contextlib.suppress(discord.Forbidden):
-                await mem.add_roles(comp, reason="App accepted")
-        if unc and unc in mem.roles:
-            with contextlib.suppress(discord.Forbidden):
-                await mem.remove_roles(unc, reason="App accepted")
 
         await self.db.update_member_form_status(i.message.id, "accepted")
         await self._finish(i, f"{mem.mention} accepted ✅", discord.Color.green())
