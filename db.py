@@ -1,13 +1,15 @@
-# db.py  –  central async-pg helper for CTFO bot
-# Production-ready (2024-10-01).  Includes:
-#   • codes / reviewers / activity / forms / staff apps / inactive members
-#   • activity exemptions & audit
-#   • full To-Do list support
-#   • helper that caps giveaway bonus tickets (+3 / user)
+# db.py – central async-pg helper for CTFO bot
+# Updated 2024-10-03
+#   • adds feedback + anon-cooldown tables and helpers
+#   • adds region / focus columns to member_forms
+#   • keeps every existing public method unchanged
+# ────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import asyncpg, json
-from typing import Dict, List, Any, Set
+import json
+from typing import Any, Dict, List, Set
+
+import asyncpg
 
 
 class Database:
@@ -15,14 +17,13 @@ class Database:
         self.dsn = dsn
         self.pool: asyncpg.Pool | None = None
 
-    # ══════════════════════════════════════════════════════════
-    #  CONNECTION & SCHEMA
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ CONNECT / SCHEMA ═══════════════════
     async def connect(self):
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
-        await self.init_tables()
+        await self._init_tables()
 
-    async def init_tables(self):
+    async def _init_tables(self):
+        """Create / patch every table we rely on (idempotent)."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -72,6 +73,10 @@ CREATE TABLE IF NOT EXISTS member_forms (
 );
 ALTER TABLE member_forms
     ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE member_forms
+    ADD COLUMN IF NOT EXISTS region TEXT;
+ALTER TABLE member_forms
+    ADD COLUMN IF NOT EXISTS focus  TEXT;
 
 -- ───────── Staff applications ─────────
 CREATE TABLE IF NOT EXISTS staff_applications (
@@ -109,18 +114,35 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
     guild_id    BIGINT,
     creator_id  BIGINT,
     description TEXT      NOT NULL,
-    max_claims  INTEGER   NOT NULL DEFAULT 0,      -- 0 = global
-    claimed     BIGINT[]  NOT NULL DEFAULT '{}',   -- users who claimed
+    max_claims  INTEGER   NOT NULL DEFAULT 0,
+    claimed     BIGINT[]  NOT NULL DEFAULT '{}',
     message_id  BIGINT,
     completed   BOOLEAN   NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- ───────── Feedback (NEW) ─────────
+CREATE TABLE IF NOT EXISTS anon_feedback_cooldown (
+    user_id BIGINT PRIMARY KEY,
+    last_ts TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id              SERIAL PRIMARY KEY,
+    msg_id          BIGINT      NOT NULL,
+    author_id       BIGINT      NOT NULL,   -- 0 == anonymous
+    category        TEXT,
+    target_id       BIGINT,
+    text            TEXT,
+    rating          INT,
+    attachment_urls TEXT[],
+    status          TEXT        NOT NULL DEFAULT 'Open',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
             )
 
-    # ══════════════════════════════════════════════════════════
-    #  CODES
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ CODES ═══════════════════
     async def get_codes(self, *, only_public: bool = False) -> Dict[str, tuple[str, bool]]:
         q = "SELECT name, pin, public FROM codes"
         if only_public:
@@ -159,9 +181,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM codes WHERE name=$1", name)
 
-    # ══════════════════════════════════════════════════════════
-    #  REVIEWERS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ REVIEWERS ═══════════════════
     async def get_reviewers(self) -> Set[int]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT user_id FROM reviewers")
@@ -178,9 +198,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM reviewers WHERE user_id=$1", uid)
 
-    # ══════════════════════════════════════════════════════════
-    #  ACTIVITY
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ ACTIVITY ═══════════════════
     async def get_activity(self, uid: int) -> Dict[str, Any] | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM activity WHERE user_id=$1", uid)
@@ -207,9 +225,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
             rows = await conn.fetch("SELECT * FROM activity")
             return {r["user_id"]: dict(r) for r in rows}
 
-    # ══════════════════════════════════════════════════════════
-    #  INACTIVE MEMBERS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ INACTIVE MEMBERS ═══════════════════
     async def add_inactive(self, uid: int, until_ts: int):
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -233,18 +249,19 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
             )
             return [dict(r) for r in rows]
 
-    # ══════════════════════════════════════════════════════════
-    #  MEMBER FORMS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ MEMBER FORMS ═══════════════════
     async def add_member_form(self, uid, data: dict, message_id: int | None = None):
         async with self.pool.acquire() as conn:
+            d = json.loads(json.dumps(data))  # ensure JSON-serialisable
             await conn.execute(
                 """
-                INSERT INTO member_forms (user_id, data, message_id, status)
-                VALUES ($1,$2,$3,'pending')
+                INSERT INTO member_forms (user_id, data, region, focus, message_id, status)
+                VALUES ($1,$2,$3,$4,$5,'pending')
                 """,
                 uid,
-                json.dumps(data),
+                json.dumps(d),
+                d.get("region"),
+                d.get("focus"),
                 message_id,
             )
 
@@ -266,9 +283,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
             )
             return [dict(r) for r in rows]
 
-    # ══════════════════════════════════════════════════════════
-    #  STAFF APPLICATIONS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ STAFF APPLICATIONS ═══════════════════
     async def add_staff_app(self, uid: int, role: str, msg_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -296,9 +311,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
             )
             return [dict(r) for r in rows]
 
-    # ══════════════════════════════════════════════════════════
-    #  ACTIVITY – EXEMPT & AUDIT
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ ACTIVITY EXEMPT / AUDIT ═══════════════════
     async def add_exempt_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -327,9 +340,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
                 details,
             )
 
-    # ══════════════════════════════════════════════════════════
-    #  TO-DO TASKS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════ TO-DO LIST ═══════════════════
     async def add_todo(
         self,
         guild_id: int,
@@ -402,7 +413,6 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM todo_tasks WHERE id=$1", task_id)
 
-    # ---- helper: how many open claims does a user have? ----
     async def count_open_claims(self, guild_id: int, user_id: int) -> int:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -418,7 +428,6 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
             )
         return row["n"] if row else 0
 
-    # ---- giveaway bonus map (cap = 3) ----
     async def todo_bonus_map(self, guild_id: int) -> Dict[int, int]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -430,9 +439,86 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
                 """,
                 guild_id,
             )
-
         bonus: Dict[int, int] = {}
         for r in rows:
             for uid in r["claimed"]:
-                bonus[uid] = min(3, bonus.get(uid, 0) + 1)  # max +3
+                bonus[uid] = min(3, bonus.get(uid, 0) + 1)
         return bonus
+
+    # ═══════════════════ FEEDBACK (NEW) ═══════════════════
+    # -- anon cooldown --
+    async def get_last_anon_ts(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_ts FROM anon_feedback_cooldown WHERE user_id=$1",
+                user_id,
+            )
+            return row["last_ts"] if row else None
+
+    async def set_last_anon_ts(self, user_id: int, ts):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO anon_feedback_cooldown (user_id, last_ts)
+                VALUES ($1,$2)
+                ON CONFLICT (user_id) DO UPDATE SET last_ts=$2
+                """,
+                user_id,
+                ts,
+            )
+
+    # -- record feedback --
+    async def record_feedback(
+        self,
+        *,
+        msg_id: int,
+        author_id: int,
+        category: str,
+        target_id: int | None,
+        text: str,
+        rating: int | None,
+        attachment_urls: list[str] | None,
+    ) -> int:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO feedback
+                  (msg_id, author_id, category, target_id,
+                   text, rating, attachment_urls)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                RETURNING id
+                """,
+                msg_id,
+                author_id,
+                category,
+                target_id,
+                text,
+                rating,
+                attachment_urls,
+            )
+        return row["id"]
+
+    async def update_feedback_status(self, fid: int, status: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE feedback SET status=$2 WHERE id=$1",
+                fid,
+                status,
+            )
+
+    async def list_feedback_by_author(
+        self, author_id: int, limit: int = 25
+    ) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, created_at, category, status
+                  FROM feedback
+                 WHERE author_id=$1
+                 ORDER BY id DESC
+                 LIMIT $2
+                """,
+                author_id,
+                limit,
+            )
+            return [dict(r) for r in rows]
