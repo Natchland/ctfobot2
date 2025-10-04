@@ -1,45 +1,79 @@
 # db.py – central async-pg helper for CTFO bot
-# Updated 2024-10-03
-#   • adds feedback + anon-cooldown tables and helpers
-#   • adds region / focus columns to member_forms
-#   • keeps every existing public method unchanged
-# ────────────────────────────────────────────────────────────
+# ===============================================================
+# Last update: 2024-10-08
+#
+# • generic helpers  fetch_one / fetch_all / execute / close
+# • full XP-system schema (xp_members, xp_boosts, …)
+# • keeps **all** previously-public methods unchanged
+#
+# Tips:
+#   await db.connect()   → open pool + run migrations
+#   await db.close()     → graceful shutdown
+# ===============================================================
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Sequence, Set
 
 import asyncpg
 
 
 class Database:
-    def __init__(self, dsn: str):
+    """Thin wrapper around an async-pg pool + convenience helpers."""
+
+    # ───────────────────────────────────────────────────────────
+    # INIT / POOL
+    # ───────────────────────────────────────────────────────────
+    def __init__(self, dsn: str) -> None:
         self.dsn = dsn
         self.pool: asyncpg.Pool | None = None
 
-    # ═══════════════════ CONNECT / SCHEMA ═══════════════════
-    async def connect(self):
+    async def connect(self) -> None:
+        """Open pool and run idempotent migrations."""
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
         await self._init_tables()
 
-    async def _init_tables(self):
-        """Create / patch every table we rely on (idempotent)."""
-        async with self.pool.acquire() as conn:
+    async def close(self) -> None:
+        """Gracefully close the connection-pool (call on shutdown)."""
+        if self.pool and not self.pool.closed:
+            await self.pool.close()
+
+    # ───────────────────────────────────────────────────────────
+    # GENERIC SMALL HELPERS  (used by newer cogs)
+    # ───────────────────────────────────────────────────────────
+    async def fetch_one(self, sql: str, *args) -> Dict[str, Any] | None:
+        """Return first row as dict or None."""
+        async with self.pool.acquire() as conn:       # type: ignore[arg-type]
+            row = await conn.fetchrow(sql, *args)
+            return dict(row) if row else None
+
+    async def fetch_all(self, sql: str, *args) -> List[Dict[str, Any]]:
+        """Return all rows as list[dict]."""
+        async with self.pool.acquire() as conn:       # type: ignore[arg-type]
+            rows: Sequence[asyncpg.Record] = await conn.fetch(sql, *args)
+            return [dict(r) for r in rows]
+
+    async def execute(self, sql: str, *args) -> None:
+        """Run statement that does not return rows."""
+        async with self.pool.acquire() as conn:       # type: ignore[arg-type]
+            await conn.execute(sql, *args)
+
+    # ───────────────────────────────────────────────────────────
+    # MIGRATIONS
+    # ───────────────────────────────────────────────────────────
+    async def _init_tables(self) -> None:
+        async with self.pool.acquire() as conn:       # type: ignore[arg-type]
             await conn.execute(
                 """
--- ───────── Codes ─────────
+-- ═════════════════════ Core / legacy tables ═════════════════════
 CREATE TABLE IF NOT EXISTS codes (
     name   TEXT PRIMARY KEY,
     pin    VARCHAR(4) NOT NULL,
     public BOOLEAN     NOT NULL DEFAULT FALSE
 );
 
--- ───────── Reviewers ─────────
-CREATE TABLE IF NOT EXISTS reviewers (
-    user_id BIGINT PRIMARY KEY
-);
+CREATE TABLE IF NOT EXISTS reviewers ( user_id BIGINT PRIMARY KEY );
 
--- ───────── Activity stats ─────────
 CREATE TABLE IF NOT EXISTS activity (
     user_id BIGINT PRIMARY KEY,
     streak  INTEGER,
@@ -48,7 +82,6 @@ CREATE TABLE IF NOT EXISTS activity (
     last    TIMESTAMP
 );
 
--- ───────── Giveaways ─────────
 CREATE TABLE IF NOT EXISTS giveaways (
     id         SERIAL PRIMARY KEY,
     channel_id BIGINT,
@@ -62,23 +95,17 @@ CREATE TABLE IF NOT EXISTS giveaways (
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS start_ts BIGINT;
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS note TEXT;
 
--- ───────── Member forms ─────────
 CREATE TABLE IF NOT EXISTS member_forms (
     id         SERIAL PRIMARY KEY,
     user_id    BIGINT,
     created_at TIMESTAMP DEFAULT now(),
     data       JSONB,
     status     TEXT NOT NULL DEFAULT 'pending',
-    message_id BIGINT
+    message_id BIGINT,
+    region     TEXT,
+    focus      TEXT
 );
-ALTER TABLE member_forms
-    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
-ALTER TABLE member_forms
-    ADD COLUMN IF NOT EXISTS region TEXT;
-ALTER TABLE member_forms
-    ADD COLUMN IF NOT EXISTS focus  TEXT;
 
--- ───────── Staff applications ─────────
 CREATE TABLE IF NOT EXISTS staff_applications (
     id         SERIAL PRIMARY KEY,
     user_id    BIGINT,
@@ -88,18 +115,13 @@ CREATE TABLE IF NOT EXISTS staff_applications (
     created_at TIMESTAMP DEFAULT now()
 );
 
--- ───────── Inactive members ─────────
 CREATE TABLE IF NOT EXISTS inactive_members (
     user_id  BIGINT PRIMARY KEY,
     until_ts BIGINT
 );
 
--- ───────── Activity exemptions ─────────
-CREATE TABLE IF NOT EXISTS exempt_users (
-    user_id BIGINT PRIMARY KEY
-);
+CREATE TABLE IF NOT EXISTS exempt_users ( user_id BIGINT PRIMARY KEY );
 
--- ───────── Activity audit ─────────
 CREATE TABLE IF NOT EXISTS activity_audit (
     id SERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -108,7 +130,6 @@ CREATE TABLE IF NOT EXISTS activity_audit (
     details TEXT
 );
 
--- ───────── To-Do list ─────────
 CREATE TABLE IF NOT EXISTS todo_tasks (
     id          SERIAL PRIMARY KEY,
     guild_id    BIGINT,
@@ -121,7 +142,7 @@ CREATE TABLE IF NOT EXISTS todo_tasks (
     created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- ───────── Feedback (NEW) ─────────
+-- ═════════════════════ Feedback tables ═════════════════════
 CREATE TABLE IF NOT EXISTS anon_feedback_cooldown (
     user_id BIGINT PRIMARY KEY,
     last_ts TIMESTAMPTZ NOT NULL
@@ -138,6 +159,64 @@ CREATE TABLE IF NOT EXISTS feedback (
     attachment_urls TEXT[],
     status          TEXT        NOT NULL DEFAULT 'Open',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ═════════════════════ XP system (NEW) ═════════════════════
+CREATE TABLE IF NOT EXISTS xp_members (
+    guild_id BIGINT NOT NULL,
+    user_id  BIGINT NOT NULL,
+    xp       BIGINT  NOT NULL DEFAULT 0,
+    level    INTEGER NOT NULL DEFAULT 0,
+    last_msg TIMESTAMPTZ,
+    streak   INTEGER NOT NULL DEFAULT 0,
+    voice_secs BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS xp_members_xp_idx
+          ON xp_members (guild_id, xp DESC);
+
+CREATE TABLE IF NOT EXISTS xp_log (
+    id       BIGSERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    user_id  BIGINT NOT NULL,
+    delta    INTEGER NOT NULL,
+    reason   TEXT,
+    ts       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS xp_channel_mult (
+    guild_id  BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    mult      NUMERIC(4,2) NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (guild_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS xp_roles (
+    guild_id BIGINT NOT NULL,
+    role_id  BIGINT NOT NULL,
+    min_level INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, role_id)
+);
+
+CREATE TABLE IF NOT EXISTS xp_levelup_channel (
+    guild_id   BIGINT PRIMARY KEY,
+    channel_id BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS xp_boosts (
+    guild_id            BIGINT PRIMARY KEY,
+    multiplier          NUMERIC(4,2) NOT NULL,
+    ends_at             TIMESTAMPTZ  NOT NULL,
+    message             TEXT,
+    announce_channel_id BIGINT,
+    announce_msg_id     BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS xp_voice_excluded (
+    guild_id   BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
 );
 """
             )
