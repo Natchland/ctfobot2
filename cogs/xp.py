@@ -67,7 +67,7 @@ def build_levelup_embed(
     embed.add_field(name="Current XP", value=f"{current_xp:,}", inline=True)
     embed.add_field(name="Next level XP", value=f"{next_level_xp:,}", inline=True)
     embed.add_field(
-        name="Progress", value=f"`{bar}` **{percent_txt}**", inline=False
+        name="Progress", value=f"{bar} **`{percent_txt}`**", inline=False
     )
     embed.set_footer(
         text="Keep chatting and hanging out in voice to earn more XP!"
