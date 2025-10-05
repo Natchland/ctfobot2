@@ -137,6 +137,7 @@ async def _run_bot() -> None:
             "cogs.feedback",
             "cogs.codes",
             "cogs.xp",                      # XP system
+            "cogs.steam_sync",
         ),
     )
     await bot.start(BOT_TOKEN)              # 3) live

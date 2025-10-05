@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Sequence, Set
+from typing import Any, Dict, List, Sequence, Set, Optional
 
 import asyncpg
 
@@ -218,6 +218,19 @@ CREATE TABLE IF NOT EXISTS xp_voice_excluded (
     channel_id BIGINT NOT NULL,
     PRIMARY KEY (guild_id, channel_id)
 );
+
+-- ═════════════════════ Steam links (NEW) ═════════════════════
+CREATE TABLE IF NOT EXISTS steam_links (
+    discord_id BIGINT PRIMARY KEY,
+    steam_id64 VARCHAR(17) NOT NULL
+);
+
+-- ═════════════════════ Steam-Sync cooldown (NEW) ═════════════════════
+CREATE TABLE IF NOT EXISTS steam_ping_cooldown (
+    discord_id BIGINT PRIMARY KEY,
+    last_ts    TIMESTAMPTZ NOT NULL
+);
+
 """
             )
 
@@ -601,3 +614,47 @@ CREATE TABLE IF NOT EXISTS xp_voice_excluded (
                 limit,
             )
             return [dict(r) for r in rows]
+
+    # ═══════════════════ STEAM LINKS (NEW) ═══════════════════
+    async def get_steam_id(self, discord_id: int) -> Optional[str]:
+        """Return the linked 64-bit Steam-ID or None if none stored."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT steam_id64 FROM steam_links WHERE discord_id = $1",
+                discord_id,
+            )
+            return row["steam_id64"] if row else None
+
+    async def set_steam_id(self, discord_id: int, steam_id: str) -> None:
+        """Store / overwrite the Steam-ID for a Discord user."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO steam_links (discord_id, steam_id64)
+                VALUES ($1, $2)
+                ON CONFLICT (discord_id) DO UPDATE
+                  SET steam_id64 = EXCLUDED.steam_id64
+                """,
+                discord_id,
+                steam_id,
+            )
+
+    # ═══════════════════ STEAM SYNC (NEW) ═══════════════════
+    async def get_last_steam_ping(self, discord_id: int):
+        """Return datetime of the last DM reminder or None."""
+        row = await self.fetch_one(
+            "SELECT last_ts FROM steam_ping_cooldown WHERE discord_id=$1",
+            discord_id,
+        )
+        return row["last_ts"] if row else None
+
+    async def set_last_steam_ping(self, discord_id: int):
+        """Upsert NOW() as the last DM timestamp."""
+        await self.execute(
+            """
+            INSERT INTO steam_ping_cooldown (discord_id, last_ts)
+            VALUES ($1, NOW())
+            ON CONFLICT (discord_id) DO UPDATE SET last_ts = NOW()
+            """,
+            discord_id,
+        )
