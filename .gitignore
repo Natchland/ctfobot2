@@ -12,3 +12,7 @@ reviewers.json
 # secrets
 .env
 .venv
+
+# output files
+context.txt
+Generate-Context.ps1

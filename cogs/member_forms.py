@@ -10,10 +10,9 @@ import json
 import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
-import requests
+import httpx
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -30,6 +29,7 @@ try:
 except Exception:
     pass
 
+
 def req(name: str) -> str:
     """Get a required env-var or raise & log clearly."""
     value = os.getenv(name)
@@ -39,73 +39,81 @@ def req(name: str) -> str:
     return value
 
 
-STEAM_API_KEY           = req("STEAM_API_KEY")
-GUILD_ID                = int(req("GUILD_ID"))
+STEAM_API_KEY = req("STEAM_API_KEY")
+GUILD_ID = int(req("GUILD_ID"))
 
 # The rest are optional – fall back to literal IDs if not found
-MEMBER_FORM_CH          = int(os.getenv("MEMBER_FORM_CH",          "1378118620873494548"))
+MEMBER_FORM_CH = int(os.getenv("MEMBER_FORM_CH", "1378118620873494548"))
 UNCOMPLETED_APP_ROLE_ID = int(os.getenv("UNCOMPLETED_APP_ROLE_ID", "1390143545066917931"))
-COMPLETED_APP_ROLE_ID   = int(os.getenv("COMPLETED_APP_ROLE_ID",   "1398708167525011568"))
-ACCEPT_ROLE_ID          = int(os.getenv("ACCEPT_ROLE_ID",          "1377075930144571452"))
+COMPLETED_APP_ROLE_ID = int(os.getenv("COMPLETED_APP_ROLE_ID", "1398708167525011568"))
+ACCEPT_ROLE_ID = int(os.getenv("ACCEPT_ROLE_ID", "1377075930144571452"))
 
 ROLE_PREFIXES = {
-    "PvP":          "[P]",
-    "Farming":      "[F]",
-    "Electricity":  "[E]",
-    "Building":     "[B]",
+    "PvP": "[P]",
+    "Farming": "[F]",
+    "Electricity": "[E]",
+    "Building": "[B]",
     "Base Sorting": "[BB]",
 }
 
 REGION_ROLE_IDS = {
     "North America": 1411364406096433212,
-    "Europe":        1411364744484491287,
-    "Asia":          1411364982117105684,
-    "Other":         1411365034440921260,
+    "Europe": 1411364744484491287,
+    "Asia": 1411364982117105684,
+    "Other": 1411365034440921260,
 }
 FOCUS_ROLE_IDS = {
-    "Farming":      1379918816871448686,
+    "Farming": 1379918816871448686,
     "Base Sorting": 1400849292524130405,
-    "Building":     1380233086544908428,
-    "Electricity":  1380233234675400875,
-    "PvP":          1408687710159245362,
+    "Building": 1380233086544908428,
+    "Electricity": 1380233234675400875,
+    "PvP": 1408687710159245362,
 }
 TEMP_BAN_SECONDS = 7 * 24 * 60 * 60
 # ══════════════════════════════════════════════════════════════
 
-# ──────────────────────────── UTIL ────────────────────────────
-_THREAD = ThreadPoolExecutor()
+# ──────────────────────────── STEAM API ────────────────────────────
+BASE_URL = "https://api.steampowered.com"
 
 
-async def _blocking_json(url: str) -> dict:
-    """Perform a blocking requests.get in a thread; never block the loop."""
-    def _req() -> dict:
-        try:
-            r = requests.get(url, timeout=6)
-            r.raise_for_status()
-            return r.json()
-        except Exception as exc:
-            log.warning("Steam request failed: %s", exc)
-            return {}
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_THREAD, _req)
+async def _steam_get(client: httpx.AsyncClient, endpoint: str, params: dict) -> dict:
+    """Call Steam Web API endpoint with given params. Never raise; return {} on error.
+    The API key is passed as a param and never logged.
+    """
+    try:
+        r = await client.get(f"{BASE_URL}/{endpoint}", params=params, timeout=6.0)
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        # Avoid logging the key; show endpoint only
+        if status == 403:
+            log.warning("Steam request 403 Forbidden on %s", endpoint)
+        else:
+            log.warning("Steam request failed (%s) on %s: %s", status, endpoint, exc)
+        return {}
+    except Exception as exc:
+        log.warning("Steam request error on %s: %s", endpoint, exc)
+        return {}
 
 
 async def extract_steam_id(url: str) -> Optional[str]:
+    """Extract a 64-bit SteamID from a profile URL. Resolve vanity if needed."""
     url = url.strip().lower()
 
     # /profiles/<64-bit>
-    if m := re.search(r"steamcommunity\.com/profiles/(\d{17})", url):
+    if (m := re.search(r"steamcommunity\.com/profiles/(\d{17})", url)):
         return m.group(1)
 
     # /id/<vanity>  → ResolveVanityURL
-    if m := re.search(r"steamcommunity\.com/id/([\w\-]+)", url):
+    if (m := re.search(r"steamcommunity\.com/id/([\w\-]+)", url)):
         vanity = m.group(1)
-        api = (
-            "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
-            f"?key={STEAM_API_KEY}&vanityurl={vanity}"
-        )
-        data = await _blocking_json(api)
+        async with httpx.AsyncClient() as client:
+            data = await _steam_get(
+                client,
+                "ISteamUser/ResolveVanityURL/v1/",
+                {"key": STEAM_API_KEY, "vanityurl": vanity},
+            )
         return data.get("response", {}).get("steamid")
 
     return None
@@ -118,41 +126,41 @@ async def is_steam_profile_valid(steam_id: str) -> bool:
       • at least 1 owned game  AND  at least 1 h (≥60 min) on ANY game
       • friends list not empty
     """
-    summary_api = (
-        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
-        f"?key={STEAM_API_KEY}&steamids={steam_id}"
-    )
-    games_api = (
-        "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
-        f"?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=0"
-    )
-    friends_api = (
-        "https://api.steampowered.com/ISteamUser/GetFriendList/v1/"
-        f"?key={STEAM_API_KEY}&steamid={steam_id}"
-    )
+    async with httpx.AsyncClient() as client:
+        summary, games, friends = await asyncio.gather(
+            _steam_get(
+                client,
+                "ISteamUser/GetPlayerSummaries/v2/",
+                {"key": STEAM_API_KEY, "steamids": steam_id},
+            ),
+            _steam_get(
+                client,
+                "IPlayerService/GetOwnedGames/v1/",
+                {"key": STEAM_API_KEY, "steamid": steam_id, "include_appinfo": 0},
+            ),
+            _steam_get(
+                client,
+                "ISteamUser/GetFriendList/v1/",
+                {"key": STEAM_API_KEY, "steamid": steam_id},
+            ),
+        )
 
-    summary, games, friends = await asyncio.gather(
-        _blocking_json(summary_api),
-        _blocking_json(games_api),
-        _blocking_json(friends_api),
-    )
-
-    # ── 1) profile visibility ─────────────────────────────────
+    # 1) profile visibility
     player = (summary.get("response", {}).get("players") or [{}])[0]
     if player.get("communityvisibilitystate") != 3:
         return False
 
-    # ── 2) games + ≥1 h play-time ─────────────────────────────
+    # 2) games + ≥1 h play-time
     g_resp = games.get("response", {})
     if g_resp.get("game_count", 0) == 0:
         return False
 
     games_list = g_resp.get("games", [])
-    has_1h = any(g.get("playtime_forever", 0) >= 60 for g in games_list)
+    has_1h = any((g.get("playtime_forever") or 0) >= 60 for g in games_list)
     if not has_1h:
         return False
 
-    # ── 3) friends not empty ─────────────────────────────────
+    # 3) friends not empty
     if not friends.get("friendslist", {}).get("friends"):
         return False
 
@@ -160,11 +168,12 @@ async def is_steam_profile_valid(steam_id: str) -> bool:
 
 
 async def get_steam_username(steam_id: str) -> Optional[str]:
-    api = (
-        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
-        f"?key={STEAM_API_KEY}&steamids={steam_id}"
-    )
-    data = await _blocking_json(api)
+    async with httpx.AsyncClient() as client:
+        data = await _steam_get(
+            client,
+            "ISteamUser/GetPlayerSummaries/v2/",
+            {"key": STEAM_API_KEY, "steamids": steam_id},
+        )
     player = (data.get("response", {}).get("players") or [{}])[0]
     return player.get("personaname")
 
@@ -178,6 +187,7 @@ async def safe_fetch(guild: discord.Guild, uid: int) -> Optional[discord.Member]
         return await guild.fetch_member(uid)
     except (discord.NotFound, discord.HTTPException):
         return None
+
 
 # ═══════════════════ MAIN COG ═══════════════════
 class MemberFormCog(commands.Cog):
@@ -212,7 +222,7 @@ class MemberFormCog(commands.Cog):
                 continue  # message gone
 
             region = row.get("region")
-            focus  = row.get("focus")
+            focus = row.get("focus")
 
             if not region or not focus:
                 raw = row.get("data") or {}
@@ -220,7 +230,7 @@ class MemberFormCog(commands.Cog):
                     with contextlib.suppress(json.JSONDecodeError):
                         raw = json.loads(raw)
                 region = region or raw.get("region")
-                focus  = focus  or raw.get("focus")
+                focus = focus or raw.get("focus")
 
             if not region or not focus:
                 continue
@@ -264,6 +274,7 @@ class MemberFormCog(commands.Cog):
 # ═══════════════════  REGISTRATION UI  ═══════════════════
 class MemberRegistrationView(discord.ui.View):
     """Five dropdowns → then Submit button."""
+
     def __init__(self, db):
         super().__init__(timeout=300)
         self.db = db
@@ -315,15 +326,33 @@ class _BaseSelect(discord.ui.Select):
 
 # ---------- concrete dropdowns ----------
 class SelectAge(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "age",    placeholder="Age",          options=_opts("12-14", "15-17", "18-21", "21+"))
+    def __init__(self, v):
+        super().__init__(v, "age", placeholder="Age", options=_opts("12-14", "15-17", "18-21", "21+"))
+
+
 class SelectRegion(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "region", placeholder="Region",       options=_opts("North America", "Europe", "Asia", "Other"))
+    def __init__(self, v):
+        super().__init__(v, "region", placeholder="Region", options=_opts("North America", "Europe", "Asia", "Other"))
+
+
 class SelectBans(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "bans",   placeholder="Any bans?",    options=_opts("Yes", "No"))
+    def __init__(self, v):
+        super().__init__(v, "bans", placeholder="Any bans?", options=_opts("Yes", "No"))
+
+
 class SelectFocus(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "focus",  placeholder="Main focus",   options=_opts("PvP", "Farming", "Base Sorting", "Building", "Electricity"))
+    def __init__(self, v):
+        super().__init__(
+            v,
+            "focus",
+            placeholder="Main focus",
+            options=_opts("PvP", "Farming", "Base Sorting", "Building", "Electricity"),
+        )
+
+
 class SelectSkill(_BaseSelect):
-    def __init__(self, v): super().__init__(v, "skill",  placeholder="Skill level",  options=_opts("Beginner", "Intermediate", "Advanced", "Expert"))
+    def __init__(self, v):
+        super().__init__(v, "skill", placeholder="Skill level", options=_opts("Beginner", "Intermediate", "Advanced", "Expert"))
 
 
 # ---------- submit helper view ----------
@@ -344,9 +373,9 @@ class FinalRegistrationModal(discord.ui.Modal):
         needs_ban = v.data.get("bans") == "Yes"
         super().__init__(title="More Details" if needs_ban else "Additional Info")
 
-        self.steam  = discord.ui.TextInput(label="Steam Profile Link", placeholder="https://steamcommunity.com/…")
-        self.hours  = discord.ui.TextInput(label="Hours in Rust")
-        self.heard  = discord.ui.TextInput(label="Where did you hear about us?")
+        self.steam = discord.ui.TextInput(label="Steam Profile Link", placeholder="https://steamcommunity.com/…")
+        self.hours = discord.ui.TextInput(label="Hours in Rust")
+        self.heard = discord.ui.TextInput(label="Where did you hear about us?")
 
         self.ban_expl = self.gender = self.referral = None
         if needs_ban:
@@ -355,7 +384,7 @@ class FinalRegistrationModal(discord.ui.Modal):
             comps = (self.steam, self.hours, self.heard, self.ban_expl, self.referral)
         else:
             self.referral = discord.ui.TextInput(label="Referral (optional)", required=False)
-            self.gender   = discord.ui.TextInput(label="Gender (optional)",   required=False)
+            self.gender = discord.ui.TextInput(label="Gender (optional)", required=False)
             comps = (self.steam, self.hours, self.heard, self.referral, self.gender)
         for c in comps:
             self.add_item(c)
