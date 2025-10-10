@@ -122,13 +122,15 @@ class StaffApplicationsCog(commands.Cog):
     @app_commands.command(name="staffapply", description="Apply for a staff position")
     async def staffapply(self, i: discord.Interaction):
         # Prevent duplicate open applications
-        if await self.db.has_open_staff_app(i.user.id):
+        # FIXED: Check if user has any pending staff applications
+        pending_apps = await self.db.get_pending_staff_apps(user_id=i.user.id)
+        if pending_apps:
             return await i.response.send_message(
                 "You already have a pending staff application.", ephemeral=True
             )
 
         await i.response.send_message(
-            "Select the staff role you’d like to apply for:",
+            "Select the staff role you'd like to apply for:",
             view=StaffRoleSelectView(self.db),
             ephemeral=True,
         )
@@ -145,7 +147,7 @@ class StaffRoleSelectView(discord.ui.View):
 class StaffRoleSelect(discord.ui.Select):
     def __init__(self, db):
         super().__init__(
-            placeholder="Select the staff role you’d like to apply for…",
+            placeholder="Select the staff role you'd like to apply for…",
             options=[discord.SelectOption(label=r, value=r) for r in STAFF_QUESTION_SETS],
         )
         self.db = db
@@ -309,28 +311,31 @@ class StaffApplicationActionView(discord.ui.View):
         custom_id="staff_app_accept",
     )
     async def accept(self, i: discord.Interaction, _):
+        # Acknowledge interaction immediately
+        await i.response.defer(ephemeral=True)
+        
         if not await self._authorised(i.user):
-            return await i.response.send_message("Not authorised.", ephemeral=True)
+            return await i.followup.send("Not authorised.", ephemeral=True)
 
         applicant = await safe_fetch(self.guild, self.applicant_id)
         if not applicant:
-            return await i.response.send_message("Applicant left.", ephemeral=True)
+            return await i.followup.send("Applicant left.", ephemeral=True)
 
         role_obj = self.guild.get_role(STAFF_ROLE_IDS[self.role])
         if not role_obj:
-            return await i.response.send_message("Role missing.", ephemeral=True)
+            return await i.followup.send("Role missing.", ephemeral=True)
 
         try:
             await applicant.add_roles(role_obj, reason="Staff application accepted")
         except discord.Forbidden:
             await self.db.update_staff_app_status(i.message.id, "error")
-            return await i.response.send_message(
+            return await i.followup.send(
                 "Cannot add role – my role is lower than the target role.",
                 ephemeral=True,
             )
 
         await self.db.update_staff_app_status(i.message.id, "accepted")
-        await i.response.send_message(f"{applicant.mention} accepted ✅", ephemeral=True)
+        await i.followup.send(f"{applicant.mention} accepted ✅", ephemeral=True)
         await self._finish(i, discord.Color.green())
         await self._notify(f"🎉 You have been **accepted** as **{self.role}**!")
 
@@ -341,11 +346,14 @@ class StaffApplicationActionView(discord.ui.View):
         custom_id="staff_app_deny",
     )
     async def deny(self, i: discord.Interaction, _):
+        # Acknowledge interaction immediately
+        await i.response.defer(ephemeral=True)
+        
         if not await self._authorised(i.user):
-            return await i.response.send_message("Not authorised.", ephemeral=True)
+            return await i.followup.send("Not authorised.", ephemeral=True)
 
         await self.db.update_staff_app_status(i.message.id, "denied")
-        await i.response.send_message("Application denied ⛔", ephemeral=True)
+        await i.followup.send("Application denied ⛔", ephemeral=True)
         await self._finish(i, discord.Color.red())
         await self._notify(f"❌ Your application for **{self.role}** was **denied**.")
 
