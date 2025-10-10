@@ -122,9 +122,11 @@ class StaffApplicationsCog(commands.Cog):
     @app_commands.command(name="staffapply", description="Apply for a staff position")
     async def staffapply(self, i: discord.Interaction):
         # Prevent duplicate open applications
-        # FIXED: Check if user has any pending staff applications
-        pending_apps = await self.db.get_pending_staff_apps(user_id=i.user.id)
-        if pending_apps:
+        # FIXED: Get all pending apps and filter manually
+        pending_apps = await self.db.get_pending_staff_apps()
+        user_has_pending = any(app["user_id"] == i.user.id for app in pending_apps)
+        
+        if user_has_pending:
             return await i.response.send_message(
                 "You already have a pending staff application.", ephemeral=True
             )
