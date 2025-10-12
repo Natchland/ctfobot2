@@ -1,192 +1,200 @@
-## cogs/warnings.py
+# cogs/warnings.py
 import discord
 from discord.ext import commands, tasks
 from typing import Optional
 import logging
 from datetime import datetime, timedelta
+import json
+import os
 import io
 import csv
 
+# Create data directory if it doesn't exist
+DATA_DIR = "data"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+
+WARNINGS_FILE = os.path.join(DATA_DIR, "warnings.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "warning_config.json")
+
 class WarningSystem(commands.Cog):
-    def __init__(self, bot, db):
+    def __init__(self, bot):
         self.bot = bot
-        self.db = db
-
-    async def cog_load(self):
-        # Create warnings table
+        self.warnings = self._load_warnings()
+        self.config = self._load_config()
+        
+    def _load_warnings(self):
+        """Load warnings from JSON file"""
         try:
-            await self.db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS warnings (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    moderator_id BIGINT NOT NULL,
-                    guild_id BIGINT NOT NULL,
-                    reason TEXT NOT NULL,
-                    case_id INTEGER UNIQUE NOT NULL,
-                    timestamp TIMESTAMP NOT NULL,
-                    warning_type VARCHAR(50) DEFAULT 'general',
-                    appeal_text TEXT,
-                    appeal_status VARCHAR(20) DEFAULT 'none',
-                    expiry_date TIMESTAMP,
-                    expired BOOLEAN DEFAULT FALSE
-                )
-                """
-            )
-            
-            # Create warning config table with proper column handling
-            await self.db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS warning_config (
-                    guild_id BIGINT PRIMARY KEY,
-                    dm_users BOOLEAN DEFAULT TRUE,
-                    auto_moderation BOOLEAN DEFAULT FALSE,
-                    log_channel_id BIGINT,
-                    escalate_3_warns BOOLEAN DEFAULT TRUE,
-                    escalate_5_warns BOOLEAN DEFAULT TRUE
-                )
-                """
-            )
-            
-            # Start expiration checker
-            self.check_expired_warnings.start()
+            if os.path.exists(WARNINGS_FILE):
+                with open(WARNINGS_FILE, 'r') as f:
+                    return json.load(f)
+            return {}
         except Exception as e:
-            logging.error(f"Error initializing warning system: {e}")
-
+            logging.error(f"Error loading warnings: {e}")
+            return {}
+    
+    def _save_warnings(self):
+        """Save warnings to JSON file"""
+        try:
+            with open(WARNINGS_FILE, 'w') as f:
+                json.dump(self.warnings, f, indent=2, default=str)
+        except Exception as e:
+            logging.error(f"Error saving warnings: {e}")
+    
+    def _load_config(self):
+        """Load config from JSON file"""
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            logging.error(f"Error loading config: {e}")
+            return {}
+    
+    def _save_config(self):
+        """Save config to JSON file"""
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving config: {e}")
+    
+    async def cog_load(self):
+        """Initialize the cog"""
+        # Start expiration checker
+        self.check_expired_warnings.start()
+    
     async def cog_unload(self):
+        """Clean up when cog is unloaded"""
         if hasattr(self, 'check_expired_warnings') and self.check_expired_warnings.is_running():
             self.check_expired_warnings.cancel()
-
+        self._save_warnings()
+        self._save_config()
+    
     @tasks.loop(hours=1)
     async def check_expired_warnings(self):
         """Check for expired warnings and mark them as expired"""
         try:
-            # Fix for your database implementation - use fetch_all properly
-            result = await self.db.fetch_all(
-                """
-                SELECT id, user_id, guild_id, case_id
-                FROM warnings
-                WHERE expiry_date <= $1 AND expired = FALSE
-                """,
-                datetime.utcnow()
-            )
+            now = datetime.utcnow()
+            changed = False
             
-            for record in result:
-                await self.db.execute(
-                    "UPDATE warnings SET expired = TRUE WHERE id = $1",
-                    record['id']
-                )
+            for guild_id, guild_warnings in self.warnings.items():
+                for warning in guild_warnings:
+                    if warning.get('expiry_date'):
+                        expiry = datetime.fromisoformat(warning['expiry_date'])
+                        if expiry <= now and not warning.get('expired', False):
+                            warning['expired'] = True
+                            changed = True
+                            
+                            # Log expiration if log channel exists
+                            guild = self.bot.get_guild(int(guild_id))
+                            if guild:
+                                config = self.config.get(guild_id, {})
+                                if config.get('log_channel_id'):
+                                    channel = guild.get_channel(config['log_channel_id'])
+                                    if channel:
+                                        user = guild.get_member(warning['user_id'])
+                                        if user:
+                                            try:
+                                                await channel.send(
+                                                    f"Warning #{warning['case_id']} for {user.mention} "
+                                                    f"has expired automatically."
+                                                )
+                                            except Exception:
+                                                pass  # Ignore channel send errors
+            
+            if changed:
+                self._save_warnings()
                 
-                # Log expiration if log channel exists
-                config = await self._get_guild_config(record['guild_id'])
-                if config and config['log_channel_id']:
-                    guild = self.bot.get_guild(record['guild_id'])
-                    if guild:
-                        channel = guild.get_channel(config['log_channel_id'])
-                        if channel:
-                            user = guild.get_member(record['user_id'])
-                            if user:
-                                try:
-                                    await channel.send(
-                                        f"Warning #{record['case_id']} for {user.mention} "
-                                        f"has expired automatically."
-                                    )
-                                except Exception:
-                                    pass  # Ignore channel send errors
         except Exception as e:
             logging.error(f"Error checking expired warnings: {e}")
-
-    async def _get_next_case_id(self):
-        """Get next case ID"""
+    
+    def _get_next_case_id(self, guild_id: str):
+        """Get next case ID for a guild"""
         try:
-            result = await self.db.fetch_one("SELECT COALESCE(MAX(case_id), 0) as max_id FROM warnings")
-            return (result['max_id'] if result and result['max_id'] else 0) + 1
+            guild_warnings = self.warnings.get(guild_id, [])
+            if not guild_warnings:
+                return 1
+            return max(w['case_id'] for w in guild_warnings) + 1
         except Exception as e:
             logging.error(f"Failed to get next case ID: {e}")
-            # Fallback to timestamp-based ID
-            return int(datetime.utcnow().timestamp())
-
-    async def _get_guild_config(self, guild_id: int):
+            return 1
+    
+    def _get_guild_config(self, guild_id: str):
         """Get guild configuration"""
+        return self.config.get(guild_id, {})
+    
+    def _log_warning(self, user_id: int, moderator_id: int, guild_id: int, 
+                    reason: str, case_id: int, timestamp: datetime, warning_type: str = "general"):
+        """Log warning to storage"""
         try:
-            result = await self.db.fetch_one(
-                "SELECT * FROM warning_config WHERE guild_id = $1",
-                guild_id
-            )
-            return result
-        except Exception as e:
-            logging.error(f"Failed to get guild config: {e}")
-            return None
-
-    async def _log_warning(self, user_id: int, moderator_id: int, guild_id: int, 
-                          reason: str, case_id: int, timestamp: datetime, warning_type: str = "general"):
-        """Log warning to database"""
-        try:
-            await self.db.execute(
-                """
-                INSERT INTO warnings 
-                (user_id, moderator_id, guild_id, reason, case_id, timestamp, warning_type)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                user_id, moderator_id, guild_id, reason, case_id, timestamp, warning_type
-            )
+            guild_id_str = str(guild_id)
+            if guild_id_str not in self.warnings:
+                self.warnings[guild_id_str] = []
+            
+            warning = {
+                'id': len(self.warnings[guild_id_str]) + 1,
+                'user_id': user_id,
+                'moderator_id': moderator_id,
+                'guild_id': guild_id,
+                'reason': reason,
+                'case_id': case_id,
+                'timestamp': timestamp.isoformat(),
+                'warning_type': warning_type,
+                'appeal_text': None,
+                'appeal_status': 'none',
+                'expiry_date': None,
+                'expired': False
+            }
+            
+            self.warnings[guild_id_str].append(warning)
+            self._save_warnings()
             return True
         except Exception as e:
             logging.error(f"Failed to log warning: {e}")
             return False
-
-    async def _get_warnings(self, user_id: int, guild_id: int, active_only: bool = True):
+    
+    def _get_warnings(self, user_id: int, guild_id: int, active_only: bool = True):
         """Get warnings for a user"""
         try:
+            guild_id_str = str(guild_id)
+            if guild_id_str not in self.warnings:
+                return []
+            
+            user_warnings = [w for w in self.warnings[guild_id_str] if w['user_id'] == user_id]
+            
             if active_only:
-                result = await self.db.fetch_all(
-                    """
-                    SELECT case_id, moderator_id, reason, timestamp, warning_type, 
-                           appeal_status, expiry_date, expired
-                    FROM warnings
-                    WHERE user_id = $1 AND guild_id = $2 AND expired = FALSE
-                    ORDER BY timestamp DESC
-                    """,
-                    user_id, guild_id
-                )
-            else:
-                result = await self.db.fetch_all(
-                    """
-                    SELECT case_id, moderator_id, reason, timestamp, warning_type, 
-                           appeal_status, expiry_date, expired
-                    FROM warnings
-                    WHERE user_id = $1 AND guild_id = $2
-                    ORDER BY timestamp DESC
-                    """,
-                    user_id, guild_id
-                )
-            return result
+                user_warnings = [w for w in user_warnings if not w.get('expired', False)]
+            
+            # Sort by timestamp descending
+            user_warnings.sort(key=lambda x: x['timestamp'], reverse=True)
+            return user_warnings
         except Exception as e:
             logging.error(f"Failed to fetch warnings: {e}")
             return []
-
-    async def _get_warning_by_case(self, case_id: int, guild_id: int):
+    
+    def _get_warning_by_case(self, case_id: int, guild_id: int):
         """Get a specific warning by case ID"""
         try:
-            result = await self.db.fetch_one(
-                """
-                SELECT user_id, moderator_id, reason, timestamp, warning_type, 
-                       appeal_text, appeal_status, expiry_date, expired
-                FROM warnings
-                WHERE case_id = $1 AND guild_id = $2
-                """,
-                case_id, guild_id
-            )
-            return result
+            guild_id_str = str(guild_id)
+            if guild_id_str not in self.warnings:
+                return None
+            
+            for warning in self.warnings[guild_id_str]:
+                if warning['case_id'] == case_id:
+                    return warning
+            return None
         except Exception as e:
             logging.error(f"Failed to fetch warning by case ID: {e}")
             return None
-
+    
     async def _log_mod_action(self, guild_id: int, action: str, moderator_id: int, 
                              target_id: int, reason: str, case_id: Optional[int] = None):
         """Log moderation action to channel"""
-        config = await self._get_guild_config(guild_id)
-        if not config or not config['log_channel_id']:
+        config = self._get_guild_config(str(guild_id))
+        if not config.get('log_channel_id'):
             return
             
         guild = self.bot.get_guild(guild_id)
@@ -218,7 +226,7 @@ class WarningSystem(commands.Cog):
             await channel.send(embed=embed)
         except Exception as e:
             logging.error(f"Failed to log mod action: {e}")
-
+    
     @commands.hybrid_command(name="warn")
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_roles=True)
@@ -228,16 +236,17 @@ class WarningSystem(commands.Cog):
         if member == ctx.author:
             await ctx.send("You cannot warn yourself!", ephemeral=True)
             return
-
+    
         if member.bot:
             await ctx.send("You cannot warn a bot!", ephemeral=True)
             return
-
+    
         # Create case ID
-        case_id = await self._get_next_case_id()
+        guild_id_str = str(ctx.guild.id)
+        case_id = self._get_next_case_id(guild_id_str)
         
         # Log warning
-        success = await self._log_warning(
+        success = self._log_warning(
             user_id=member.id,
             moderator_id=ctx.author.id,
             guild_id=ctx.guild.id,
@@ -246,15 +255,15 @@ class WarningSystem(commands.Cog):
             timestamp=ctx.message.created_at,
             warning_type=warning_type
         )
-
+    
         if not success:
             await ctx.send("Failed to log warning. Please try again.", ephemeral=True)
             return
-
+    
         # Send DM to warned user
         dm_success = True
-        config = await self._get_guild_config(ctx.guild.id)
-        if config and config.get('dm_users', True):
+        config = self._get_guild_config(guild_id_str)
+        if config.get('dm_users', True):
             try:
                 embed = discord.Embed(
                     title="⚠️ You have been warned",
@@ -270,7 +279,7 @@ class WarningSystem(commands.Cog):
                 await member.send(embed=embed)
             except discord.Forbidden:
                 dm_success = False
-
+    
         # Confirmation message
         embed = discord.Embed(
             title="User Warned",
@@ -293,20 +302,20 @@ class WarningSystem(commands.Cog):
             ctx.guild.id, "Warning", ctx.author.id, member.id, 
             f"{warning_type}: {reason}", case_id
         )
-
+    
     @commands.hybrid_command(name="warnings")
     @commands.has_permissions(manage_messages=True)
     async def list_warnings(self, ctx, member: Optional[discord.Member] = None, 
                            include_expired: bool = False):
         """List warnings for a user"""
         target = member or ctx.author
-        warnings = await self._get_warnings(target.id, ctx.guild.id, active_only=not include_expired)
+        warnings = self._get_warnings(target.id, ctx.guild.id, active_only=not include_expired)
         
         if not warnings:
             status = " (including expired)" if include_expired else ""
             await ctx.send(f"{target.mention} has no warnings{status}.")
             return
-
+    
         embed = discord.Embed(
             title=f"Warnings for {target}",
             color=discord.Color.orange()
@@ -318,12 +327,14 @@ class WarningSystem(commands.Cog):
             expired_text = " (Expired)" if warning.get('expired') else ""
             appeal_status = f" ({warning['appeal_status'].title()})" if warning['appeal_status'] != 'none' else ""
             
+            timestamp = datetime.fromisoformat(warning['timestamp'])
+            
             embed.add_field(
                 name=f"Case #{warning['case_id']}{expired_text}{appeal_status}",
                 value=f"**Type:** {warning['warning_type'].title()}\n"
                       f"**Reason:** {warning['reason']}\n"
                       f"**Moderator:** {moderator}\n"
-                      f"**Date:** {warning['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}",
+                      f"**Date:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
                 inline=False
             )
         
@@ -333,21 +344,25 @@ class WarningSystem(commands.Cog):
             embed.set_footer(text=f"Total: {warning_count} warning(s)")
             
         await ctx.send(embed=embed)
-
+    
     @commands.hybrid_command(name="delwarn")
     @commands.has_permissions(administrator=True)
     async def delete_warning(self, ctx, case_id: int):
         """Permanently delete a specific warning by case ID"""
-        warning = await self._get_warning_by_case(case_id, ctx.guild.id)
+        guild_id_str = str(ctx.guild.id)
+        warning = self._get_warning_by_case(case_id, ctx.guild.id)
         if not warning:
             await ctx.send("No warning found with that case ID.", ephemeral=True)
             return
-
+    
         try:
-            await self.db.execute(
-                "DELETE FROM warnings WHERE case_id = $1 AND guild_id = $2",
-                case_id, ctx.guild.id
-            )
+            # Remove warning from list
+            if guild_id_str in self.warnings:
+                self.warnings[guild_id_str] = [
+                    w for w in self.warnings[guild_id_str] 
+                    if w['case_id'] != case_id
+                ]
+                self._save_warnings()
                 
             await ctx.send(f"Warning case #{case_id} has been permanently deleted.")
             
@@ -359,34 +374,42 @@ class WarningSystem(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to delete warning: {e}")
             await ctx.send("An error occurred while deleting the warning.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="clearwarns")
     @commands.has_permissions(administrator=True)
     async def clear_warnings(self, ctx, member: discord.Member):
         """Clear all warnings for a user"""
         try:
-            await self.db.execute(
-                "DELETE FROM warnings WHERE user_id = $1 AND guild_id = $2",
-                member.id, ctx.guild.id
-            )
-            
-            await ctx.send(f"Cleared warnings for {member.mention}.")
+            guild_id_str = str(ctx.guild.id)
+            if guild_id_str in self.warnings:
+                initial_count = len(self.warnings[guild_id_str])
+                self.warnings[guild_id_str] = [
+                    w for w in self.warnings[guild_id_str] 
+                    if w['user_id'] != member.id
+                ]
+                self._save_warnings()
+                
+                deleted_count = initial_count - len(self.warnings[guild_id_str])
+            else:
+                deleted_count = 0
+                
+            await ctx.send(f"Cleared {deleted_count} warning(s) for {member.mention}.")
             
             # Log action
             await self._log_mod_action(
                 ctx.guild.id, "Warnings Cleared", ctx.author.id, 
-                member.id, f"Cleared warnings"
+                member.id, f"Cleared {deleted_count} warnings"
             )
         except Exception as e:
             logging.error(f"Failed to clear warnings: {e}")
             await ctx.send("An error occurred while clearing warnings.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="warncount")
     @commands.has_permissions(manage_messages=True)
     async def warn_count(self, ctx, member: Optional[discord.Member] = None):
         """Show warning count for a user"""
         target = member or ctx.author
-        warnings = await self._get_warnings(target.id, ctx.guild.id)
+        warnings = self._get_warnings(target.id, ctx.guild.id)
         
         embed = discord.Embed(
             title=f"Warning Summary for {target}",
@@ -397,21 +420,25 @@ class WarningSystem(commands.Cog):
         embed.set_thumbnail(url=target.display_avatar.url)
         
         await ctx.send(embed=embed)
-
+    
     @commands.hybrid_command(name="editwarn")
     @commands.has_permissions(manage_messages=True)
     async def edit_warning(self, ctx, case_id: int, *, new_reason: str):
         """Edit the reason for a warning"""
-        warning = await self._get_warning_by_case(case_id, ctx.guild.id)
+        guild_id_str = str(ctx.guild.id)
+        warning = self._get_warning_by_case(case_id, ctx.guild.id)
         if not warning:
             await ctx.send("No warning found with that case ID.", ephemeral=True)
             return
-
+    
         try:
-            await self.db.execute(
-                "UPDATE warnings SET reason = $1 WHERE case_id = $2 AND guild_id = $3",
-                new_reason, case_id, ctx.guild.id
-            )
+            # Update warning reason
+            if guild_id_str in self.warnings:
+                for w in self.warnings[guild_id_str]:
+                    if w['case_id'] == case_id:
+                        w['reason'] = new_reason
+                        break
+                self._save_warnings()
             
             await ctx.send(f"Warning case #{case_id} reason updated.")
             
@@ -423,12 +450,13 @@ class WarningSystem(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to edit warning: {e}")
             await ctx.send("An error occurred while editing the warning.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="expirewarn")
     @commands.has_permissions(manage_messages=True)
     async def expire_warning(self, ctx, case_id: int, days: int = 30):
         """Set a warning to expire after specified days"""
-        warning = await self._get_warning_by_case(case_id, ctx.guild.id)
+        guild_id_str = str(ctx.guild.id)
+        warning = self._get_warning_by_case(case_id, ctx.guild.id)
         if not warning:
             await ctx.send("No warning found with that case ID.", ephemeral=True)
             return
@@ -436,10 +464,13 @@ class WarningSystem(commands.Cog):
         expiry_date = datetime.utcnow() + timedelta(days=days)
         
         try:
-            await self.db.execute(
-                "UPDATE warnings SET expiry_date = $1 WHERE case_id = $2 AND guild_id = $3",
-                expiry_date, case_id, ctx.guild.id
-            )
+            # Update warning expiry date
+            if guild_id_str in self.warnings:
+                for w in self.warnings[guild_id_str]:
+                    if w['case_id'] == case_id:
+                        w['expiry_date'] = expiry_date.isoformat()
+                        break
+                self._save_warnings()
             
             await ctx.send(f"Warning #{case_id} will expire in {days} days.")
             
@@ -451,11 +482,12 @@ class WarningSystem(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to set expiry: {e}")
             await ctx.send("Failed to set expiry date.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="appeal")
     async def appeal_warning(self, ctx, case_id: int, *, appeal_text: str):
         """Appeal a warning"""
-        warning = await self._get_warning_by_case(case_id, ctx.guild.id)
+        guild_id_str = str(ctx.guild.id)
+        warning = self._get_warning_by_case(case_id, ctx.guild.id)
         if not warning:
             await ctx.send("No warning found with that case ID.", ephemeral=True)
             return
@@ -469,14 +501,14 @@ class WarningSystem(commands.Cog):
             return
             
         try:
-            await self.db.execute(
-                """
-                UPDATE warnings 
-                SET appeal_text = $1, appeal_status = 'pending'
-                WHERE case_id = $2 AND guild_id = $3
-                """,
-                appeal_text, case_id, ctx.guild.id
-            )
+            # Update warning appeal status
+            if guild_id_str in self.warnings:
+                for w in self.warnings[guild_id_str]:
+                    if w['case_id'] == case_id:
+                        w['appeal_text'] = appeal_text
+                        w['appeal_status'] = 'pending'
+                        break
+                self._save_warnings()
             
             await ctx.send("Your appeal has been submitted.")
             
@@ -488,7 +520,7 @@ class WarningSystem(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to submit appeal: {e}")
             await ctx.send("Failed to submit appeal.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="resolveappeal")
     @commands.has_permissions(manage_messages=True)
     async def resolve_appeal(self, ctx, case_id: int, decision: str, *, reason: str = "No reason provided"):
@@ -497,7 +529,8 @@ class WarningSystem(commands.Cog):
             await ctx.send("Decision must be 'approve' or 'deny'.", ephemeral=True)
             return
             
-        warning = await self._get_warning_by_case(case_id, ctx.guild.id)
+        guild_id_str = str(ctx.guild.id)
+        warning = self._get_warning_by_case(case_id, ctx.guild.id)
         if not warning:
             await ctx.send("No warning found with that case ID.", ephemeral=True)
             return
@@ -507,14 +540,13 @@ class WarningSystem(commands.Cog):
             return
             
         try:
-            await self.db.execute(
-                """
-                UPDATE warnings 
-                SET appeal_status = $1
-                WHERE case_id = $2 AND guild_id = $3
-                """,
-                decision, case_id, ctx.guild.id
-            )
+            # Update warning appeal status
+            if guild_id_str in self.warnings:
+                for w in self.warnings[guild_id_str]:
+                    if w['case_id'] == case_id:
+                        w['appeal_status'] = decision
+                        break
+                self._save_warnings()
             
             status_text = "approved" if decision == "approve" else "denied"
             await ctx.send(f"Appeal for warning #{case_id} has been {status_text}.")
@@ -538,13 +570,13 @@ class WarningSystem(commands.Cog):
         except Exception as e:
             logging.error(f"Failed to resolve appeal: {e}")
             await ctx.send("Failed to resolve appeal.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="exportwarns")
     @commands.has_permissions(administrator=True)
     async def export_warnings(self, ctx, member: Optional[discord.Member] = None):
         """Export warnings to CSV"""
         target = member or ctx.author
-        warnings = await self._get_warnings(target.id, ctx.guild.id, active_only=False)
+        warnings = self._get_warnings(target.id, ctx.guild.id, active_only=False)
         
         if not warnings:
             await ctx.send(f"{target.mention} has no warnings to export.")
@@ -563,9 +595,9 @@ class WarningSystem(commands.Cog):
                 warning['moderator_id'],
                 warning['reason'],
                 warning['warning_type'],
-                warning['timestamp'].isoformat(),
+                warning['timestamp'],
                 warning['appeal_status'],
-                warning['expiry_date'].isoformat() if warning['expiry_date'] else '',
+                warning['expiry_date'] or '',
                 warning['expired']
             ])
             
@@ -577,7 +609,7 @@ class WarningSystem(commands.Cog):
             f"Exported {len(warnings)} warnings for {target}",
             file=discord.File(buffer, filename=buffer.name)
         )
-
+    
     @commands.hybrid_command(name="warnconfig")
     @commands.has_permissions(administrator=True)
     async def config_warnings(self, ctx, setting: str, value: str):
@@ -588,27 +620,11 @@ class WarningSystem(commands.Cog):
             return
             
         try:
-            # Get current config
-            current = await self.db.fetch_one(
-                "SELECT * FROM warning_config WHERE guild_id = $1",
-                ctx.guild.id
-            )
+            guild_id_str = str(ctx.guild.id)
+            if guild_id_str not in self.config:
+                self.config[guild_id_str] = {}
             
-            # Create if not exists
-            if not current:
-                await self.db.execute(
-                    """
-                    INSERT INTO warning_config (guild_id) VALUES ($1)
-                    """,
-                    ctx.guild.id
-                )
-                # Refresh current after insert
-                current = await self.db.fetch_one(
-                    "SELECT * FROM warning_config WHERE guild_id = $1",
-                    ctx.guild.id
-                )
-            
-            # Update setting - use proper column names
+            # Update setting
             if setting == 'log_channel_id':
                 try:
                     channel_id = int(value)
@@ -620,65 +636,46 @@ class WarningSystem(commands.Cog):
                     await ctx.send("Channel ID must be a number.", ephemeral=True)
                     return
                     
-                await self.db.execute(
-                    "UPDATE warning_config SET log_channel_id = $1 WHERE guild_id = $2",
-                    channel_id, ctx.guild.id
-                )
+                self.config[guild_id_str]['log_channel_id'] = channel_id
             elif setting in ['dm_users', 'auto_moderation', 'escalate_3_warns', 'escalate_5_warns']:
                 bool_value = value.lower() in ['true', '1', 'yes', 'on']
-                await self.db.execute(
-                    f"UPDATE warning_config SET {setting} = $1 WHERE guild_id = $2",
-                    bool_value, ctx.guild.id
-                )
+                self.config[guild_id_str][setting] = bool_value
                 
+            self._save_config()
             await ctx.send(f"Setting `{setting}` updated to `{value}`.")
         except Exception as e:
             logging.error(f"Failed to update config: {e}")
             await ctx.send("Failed to update configuration.", ephemeral=True)
-
+    
     @commands.hybrid_command(name="warnstats")
     @commands.has_permissions(manage_messages=True)
     async def warning_stats(self, ctx):
         """Show server warning statistics"""
         try:
+            guild_id_str = str(ctx.guild.id)
+            guild_warnings = self.warnings.get(guild_id_str, [])
+            
             # Total warnings
-            total_result = await self.db.fetch_one(
-                "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1",
-                ctx.guild.id
-            )
-            total = total_result['count'] if total_result and 'count' in total_result else 0
+            total = len(guild_warnings)
             
             # Active warnings
-            active_result = await self.db.fetch_one(
-                "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1 AND expired = FALSE",
-                ctx.guild.id
-            )
-            active = active_result['count'] if active_result and 'count' in active_result else 0
+            active = len([w for w in guild_warnings if not w.get('expired', False)])
             
             # Top moderators
-            top_mods = await self.db.fetch_all(
-                """
-                SELECT moderator_id, COUNT(*) as count
-                FROM warnings
-                WHERE guild_id = $1
-                GROUP BY moderator_id
-                ORDER BY count DESC
-                LIMIT 5
-                """,
-                ctx.guild.id
-            )
+            mod_counts = {}
+            for warning in guild_warnings:
+                mod_id = warning['moderator_id']
+                mod_counts[mod_id] = mod_counts.get(mod_id, 0) + 1
+            
+            top_mods = sorted(mod_counts.items(), key=lambda x: x[1], reverse=True)[:5]
             
             # Warning types
-            type_counts = await self.db.fetch_all(
-                """
-                SELECT warning_type, COUNT(*) as count
-                FROM warnings
-                WHERE guild_id = $1
-                GROUP BY warning_type
-                ORDER BY count DESC
-                """,
-                ctx.guild.id
-            )
+            type_counts = {}
+            for warning in guild_warnings:
+                w_type = warning['warning_type']
+                type_counts[w_type] = type_counts.get(w_type, 0) + 1
+            
+            top_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:5]
             
             embed = discord.Embed(
                 title="Warning Statistics",
@@ -690,13 +687,13 @@ class WarningSystem(commands.Cog):
             
             if top_mods:
                 mod_list = []
-                for mod_record in top_mods:
-                    moderator = ctx.guild.get_member(mod_record['moderator_id'])
-                    mod_list.append(f"{moderator or 'Unknown'}: {mod_record['count']}")
+                for mod_id, count in top_mods:
+                    moderator = ctx.guild.get_member(mod_id)
+                    mod_list.append(f"{moderator or 'Unknown'}: {count}")
                 embed.add_field(name="Top Moderators", value="\n".join(mod_list[:5]), inline=False)
                 
-            if type_counts:
-                type_list = [f"{t['warning_type'].title()}: {t['count']}" for t in type_counts[:5]]
+            if top_types:
+                type_list = [f"{w_type.title()}: {count}" for w_type, count in top_types[:5]]
                 embed.add_field(name="Warning Types", value="\n".join(type_list), inline=False)
                 
             await ctx.send(embed=embed)
@@ -704,5 +701,5 @@ class WarningSystem(commands.Cog):
             logging.error(f"Failed to get warning stats: {e}")
             await ctx.send("Failed to retrieve statistics.", ephemeral=True)
 
-async def setup(bot, db):
-    await bot.add_cog(WarningSystem(bot, db))
+async def setup(bot):
+    await bot.add_cog(WarningSystem(bot))
