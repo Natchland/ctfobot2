@@ -48,13 +48,13 @@ PERIOD_CHOICES = [
 class ActivityCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
-        self._maintenance_started = False
+        self._maintenance_task = None
         log.info("ActivityCog initialised")
 
     async def cog_load(self):
         """Called when the cog is loaded"""
         # Schedule maintenance task to start after bot is ready
-        self.bot.loop.create_task(self._start_maintenance_task())
+        self._maintenance_task = asyncio.create_task(self._start_maintenance_task())
         log.info("ActivityCog load scheduled")
 
     async def _start_maintenance_task(self):
@@ -68,7 +68,6 @@ class ActivityCog(commands.Cog):
             
             # Start the maintenance task
             self.maintenance.start()
-            self._maintenance_started = True
             log.info("Maintenance task started successfully")
         except Exception as e:
             log.error(f"Failed to start maintenance task: {e}")
@@ -183,7 +182,7 @@ class ActivityCog(commands.Cog):
         """Execute the daily maintenance cycle"""
         try:
             # --- skip if today's cycle already executed ---
-            already = await self.db.pool.fetchval(
+            result = await self.db.fetch_one(
                 """
                 SELECT 1 FROM activity_audit
                  WHERE event_type = 'maintenance'
@@ -191,7 +190,7 @@ class ActivityCog(commands.Cog):
                  LIMIT 1
                 """
             )
-            if already:
+            if result:
                 log.info("[activity] Daily maintenance already ran today – skipping.")
                 return
 
@@ -301,7 +300,8 @@ class ActivityCog(commands.Cog):
 
             # ---------- remove expired inactive roles ----------
             now_ts = int(datetime.now(timezone.utc).timestamp())
-            for row in await self.db.get_expired_inactive(now_ts):
+            expired = await self.db.get_expired_inactive(now_ts)
+            for row in expired:
                 mem = guild.get_member(row["user_id"])
                 if not mem:
                     await self.db.remove_inactive(row["user_id"])
@@ -456,6 +456,8 @@ class ActivityCog(commands.Cog):
     # -----------------------------------------------------------------
 
     def cog_unload(self):
+        if self._maintenance_task and not self._maintenance_task.done():
+            self._maintenance_task.cancel()
         if hasattr(self, 'maintenance') and self.maintenance.is_running():
             self.maintenance.cancel()
         log.info("ActivityCog unloaded")

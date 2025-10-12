@@ -6,7 +6,6 @@ import logging
 from datetime import datetime, timedelta
 import io
 import csv
-import asyncio
 
 class WarningSystem(commands.Cog):
     def __init__(self, bot, db):
@@ -61,8 +60,8 @@ class WarningSystem(commands.Cog):
     async def check_expired_warnings(self):
         """Check for expired warnings and mark them as expired"""
         try:
-            # Fix for your database implementation - use fetchval/fetchrow properly
-            result = await self.db.fetch(
+            # Fix for your database implementation - use fetch_all properly
+            result = await self.db.fetch_all(
                 """
                 SELECT id, user_id, guild_id, case_id
                 FROM warnings
@@ -99,8 +98,8 @@ class WarningSystem(commands.Cog):
     async def _get_next_case_id(self):
         """Get next case ID"""
         try:
-            result = await self.db.fetchval("SELECT COALESCE(MAX(case_id), 0) FROM warnings")
-            return result + 1
+            result = await self.db.fetch_one("SELECT COALESCE(MAX(case_id), 0) as max_id FROM warnings")
+            return (result['max_id'] if result['max_id'] else 0) + 1
         except Exception as e:
             logging.error(f"Failed to get next case ID: {e}")
             # Fallback to timestamp-based ID
@@ -109,7 +108,7 @@ class WarningSystem(commands.Cog):
     async def _get_guild_config(self, guild_id: int):
         """Get guild configuration"""
         try:
-            result = await self.db.fetchrow(
+            result = await self.db.fetch_one(
                 "SELECT * FROM warning_config WHERE guild_id = $1",
                 guild_id
             )
@@ -139,7 +138,7 @@ class WarningSystem(commands.Cog):
         """Get warnings for a user"""
         try:
             if active_only:
-                result = await self.db.fetch(
+                result = await self.db.fetch_all(
                     """
                     SELECT case_id, moderator_id, reason, timestamp, warning_type, 
                            appeal_status, expiry_date, expired
@@ -150,7 +149,7 @@ class WarningSystem(commands.Cog):
                     user_id, guild_id
                 )
             else:
-                result = await self.db.fetch(
+                result = await self.db.fetch_all(
                     """
                     SELECT case_id, moderator_id, reason, timestamp, warning_type, 
                            appeal_status, expiry_date, expired
@@ -168,7 +167,7 @@ class WarningSystem(commands.Cog):
     async def _get_warning_by_case(self, case_id: int, guild_id: int):
         """Get a specific warning by case ID"""
         try:
-            result = await self.db.fetchrow(
+            result = await self.db.fetch_one(
                 """
                 SELECT user_id, moderator_id, reason, timestamp, warning_type, 
                        appeal_text, appeal_status, expiry_date, expired
@@ -365,21 +364,17 @@ class WarningSystem(commands.Cog):
     async def clear_warnings(self, ctx, member: discord.Member):
         """Clear all warnings for a user"""
         try:
-            result = await self.db.execute(
+            await self.db.execute(
                 "DELETE FROM warnings WHERE user_id = $1 AND guild_id = $2",
                 member.id, ctx.guild.id
             )
             
-            deleted_count = 0
-            if "DELETE" in result:
-                deleted_count = int(result.split()[1]) if len(result.split()) > 1 else 0
-                
-            await ctx.send(f"Cleared {deleted_count} warning(s) for {member.mention}.")
+            await ctx.send(f"Cleared warnings for {member.mention}.")
             
             # Log action
             await self._log_mod_action(
                 ctx.guild.id, "Warnings Cleared", ctx.author.id, 
-                member.id, f"Cleared {deleted_count} warnings"
+                member.id, f"Cleared warnings"
             )
         except Exception as e:
             logging.error(f"Failed to clear warnings: {e}")
@@ -593,7 +588,7 @@ class WarningSystem(commands.Cog):
             
         try:
             # Get current config
-            current = await self.db.fetchrow(
+            current = await self.db.fetch_one(
                 "SELECT * FROM warning_config WHERE guild_id = $1",
                 ctx.guild.id
             )
@@ -641,21 +636,21 @@ class WarningSystem(commands.Cog):
         """Show server warning statistics"""
         try:
             # Total warnings
-            total_result = await self.db.fetchval(
-                "SELECT COUNT(*) FROM warnings WHERE guild_id = $1",
+            total_result = await self.db.fetch_one(
+                "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1",
                 ctx.guild.id
             )
-            total = total_result or 0
+            total = total_result['count'] if total_result else 0
             
             # Active warnings
-            active_result = await self.db.fetchval(
-                "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND expired = FALSE",
+            active_result = await self.db.fetch_one(
+                "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1 AND expired = FALSE",
                 ctx.guild.id
             )
-            active = active_result or 0
+            active = active_result['count'] if active_result else 0
             
             # Top moderators
-            top_mods = await self.db.fetch(
+            top_mods = await self.db.fetch_all(
                 """
                 SELECT moderator_id, COUNT(*) as count
                 FROM warnings
@@ -668,7 +663,7 @@ class WarningSystem(commands.Cog):
             )
             
             # Warning types
-            type_counts = await self.db.fetch(
+            type_counts = await self.db.fetch_all(
                 """
                 SELECT warning_type, COUNT(*) as count
                 FROM warnings
