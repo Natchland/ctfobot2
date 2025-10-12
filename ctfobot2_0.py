@@ -136,6 +136,7 @@ async def _run_bot() -> None:
             "cogs.todo",
             "cogs.feedback",
             "cogs.codes",
+            "cogs.warnings",
             "cogs.xp",                      # XP system
             "cogs.steam_sync",
         ),
