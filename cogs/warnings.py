@@ -18,7 +18,7 @@ WARNINGS_FILE = os.path.join(DATA_DIR, "warnings.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "warning_config.json")
 
 class WarningSystem(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, db=None):
         self.bot = bot
         self.warnings = self._load_warnings()
         self.config = self._load_config()
@@ -83,27 +83,31 @@ class WarningSystem(commands.Cog):
             for guild_id, guild_warnings in self.warnings.items():
                 for warning in guild_warnings:
                     if warning.get('expiry_date'):
-                        expiry = datetime.fromisoformat(warning['expiry_date'])
-                        if expiry <= now and not warning.get('expired', False):
-                            warning['expired'] = True
-                            changed = True
-                            
-                            # Log expiration if log channel exists
-                            guild = self.bot.get_guild(int(guild_id))
-                            if guild:
-                                config = self.config.get(guild_id, {})
-                                if config.get('log_channel_id'):
-                                    channel = guild.get_channel(config['log_channel_id'])
-                                    if channel:
-                                        user = guild.get_member(warning['user_id'])
-                                        if user:
-                                            try:
-                                                await channel.send(
-                                                    f"Warning #{warning['case_id']} for {user.mention} "
-                                                    f"has expired automatically."
-                                                )
-                                            except Exception:
-                                                pass  # Ignore channel send errors
+                        try:
+                            expiry = datetime.fromisoformat(warning['expiry_date'])
+                            if expiry <= now and not warning.get('expired', False):
+                                warning['expired'] = True
+                                changed = True
+                                
+                                # Log expiration if log channel exists
+                                guild = self.bot.get_guild(int(guild_id))
+                                if guild:
+                                    config = self.config.get(guild_id, {})
+                                    if config.get('log_channel_id'):
+                                        channel = guild.get_channel(config['log_channel_id'])
+                                        if channel:
+                                            user = guild.get_member(warning['user_id'])
+                                            if user:
+                                                try:
+                                                    await channel.send(
+                                                        f"Warning #{warning['case_id']} for {user.mention} "
+                                                        f"has expired automatically."
+                                                    )
+                                                except Exception:
+                                                    pass  # Ignore channel send errors
+                        except ValueError:
+                            # Handle invalid date format
+                            pass
             
             if changed:
                 self._save_warnings()
@@ -327,14 +331,18 @@ class WarningSystem(commands.Cog):
             expired_text = " (Expired)" if warning.get('expired') else ""
             appeal_status = f" ({warning['appeal_status'].title()})" if warning['appeal_status'] != 'none' else ""
             
-            timestamp = datetime.fromisoformat(warning['timestamp'])
+            try:
+                timestamp = datetime.fromisoformat(warning['timestamp'])
+                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                timestamp_str = warning['timestamp']
             
             embed.add_field(
                 name=f"Case #{warning['case_id']}{expired_text}{appeal_status}",
                 value=f"**Type:** {warning['warning_type'].title()}\n"
                       f"**Reason:** {warning['reason']}\n"
                       f"**Moderator:** {moderator}\n"
-                      f"**Date:** {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+                      f"**Date:** {timestamp_str}",
                 inline=False
             )
         
@@ -701,5 +709,5 @@ class WarningSystem(commands.Cog):
             logging.error(f"Failed to get warning stats: {e}")
             await ctx.send("Failed to retrieve statistics.", ephemeral=True)
 
-async def setup(bot):
-    await bot.add_cog(WarningSystem(bot))
+async def setup(bot, db=None):
+    await bot.add_cog(WarningSystem(bot, db))
