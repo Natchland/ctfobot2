@@ -1,12 +1,5 @@
 # cogs/activity.py  –  daily inactivity management
 # Production-ready • discord.py ≥2.3 • 2024-10-03
-#
-#  • Runs once per calendar day, even if the bot restarts.
-#    (Checks activity_audit for an entry with event_type='maintenance'
-#     and today's date.  If present → skip cycle.)
-#  • After a successful cycle it records that audit row so reboots on
-#    the same day will not resend warnings / kicks.
-#  • Nothing else in behaviour changed.
 
 from __future__ import annotations
 
@@ -55,19 +48,28 @@ PERIOD_CHOICES = [
 class ActivityCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
+        self._maintenance_started = False
         log.info("ActivityCog initialised")
 
     async def cog_load(self):
         """Called when the cog is loaded"""
-        # Start the maintenance task after a delay to ensure bot is ready
-        self.bot.loop.call_later(30, self._start_maintenance)
-        log.info("ActivityCog loaded")
+        # Schedule maintenance task to start after bot is ready
+        self.bot.loop.create_task(self._start_maintenance_task())
+        log.info("ActivityCog load scheduled")
 
-    def _start_maintenance(self):
-        """Start the maintenance task with proper error handling"""
+    async def _start_maintenance_task(self):
+        """Start the maintenance task after bot is ready"""
         try:
+            # Wait for bot to be ready
+            await self.bot.wait_until_ready()
+            
+            # Wait a bit more for everything to stabilize
+            await asyncio.sleep(5)
+            
+            # Start the maintenance task
             self.maintenance.start()
-            log.info("Maintenance task started")
+            self._maintenance_started = True
+            log.info("Maintenance task started successfully")
         except Exception as e:
             log.error(f"Failed to start maintenance task: {e}")
 
@@ -89,13 +91,13 @@ class ActivityCog(commands.Cog):
         try:
             await m.send(msg)
             return True
-        except Exception as e:                              # DM blocked / user closed DMs
+        except Exception as e:
             ch_id = fallback_channel or INACTIVE_CH_ID
             ch = m.guild.get_channel(ch_id)
             if isinstance(ch, discord.TextChannel):
                 try:
                     await ch.send(f"{m.mention} {msg}")
-                except Exception as ch_err:                # even fallback failed
+                except Exception as ch_err:
                     log.warning(f"Fallback message failed for {m}: {ch_err}")
             log.info(f"DM failed for {m}: {e} (used fallback channel)")
             return False
@@ -171,34 +173,11 @@ class ActivityCog(commands.Cog):
     @tasks.loop(hours=24, reconnect=True)
     async def maintenance(self):
         """Main maintenance task - runs once per day"""
-        # Wait for bot to be ready with proper error handling
-        try:
-            await self._wait_for_ready()
-        except Exception as e:
-            log.error(f"Error waiting for bot ready: {e}")
-            return
-            
         try:
             await self._maintenance_cycle()
         except Exception as e:
             log.error(f"Error in maintenance cycle: {e}")
             await self._log(f"❌ Maintenance cycle failed: {e}")
-
-    async def _wait_for_ready(self):
-        """Wait for bot to be ready with timeout and error handling"""
-        timeout = 300  # 5 minutes timeout
-        start_time = asyncio.get_event_loop().time()
-        
-        while not self.bot.is_ready():
-            if asyncio.get_event_loop().time() - start_time > timeout:
-                raise TimeoutError("Bot not ready within timeout period")
-            await asyncio.sleep(5)
-            
-        # Additional check for database
-        while self.db.pool is None:
-            if asyncio.get_event_loop().time() - start_time > timeout:
-                raise TimeoutError("Database not ready within timeout period")
-            await asyncio.sleep(5)
 
     async def _maintenance_cycle(self):
         """Execute the daily maintenance cycle"""
