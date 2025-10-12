@@ -709,5 +709,6 @@ class WarningSystem(commands.Cog):
             logging.error(f"Failed to get warning stats: {e}")
             await ctx.send("Failed to retrieve statistics.", ephemeral=True)
 
+# Make sure the setup function accepts both parameters
 async def setup(bot, db=None):
     await bot.add_cog(WarningSystem(bot, db))
