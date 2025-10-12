@@ -3,7 +3,7 @@
 #
 #  • Runs once per calendar day, even if the bot restarts.
 #    (Checks activity_audit for an entry with event_type='maintenance'
-#     and today’s date.  If present → skip cycle.)
+#     and today's date.  If present → skip cycle.)
 #  • After a successful cycle it records that audit row so reboots on
 #    the same day will not resend warnings / kicks.
 #  • Nothing else in behaviour changed.
@@ -55,8 +55,21 @@ PERIOD_CHOICES = [
 class ActivityCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db):
         self.bot, self.db = bot, db
-        self.maintenance.start()
         log.info("ActivityCog initialised")
+
+    async def cog_load(self):
+        """Called when the cog is loaded"""
+        # Start the maintenance task after a delay to ensure bot is ready
+        self.bot.loop.call_later(30, self._start_maintenance)
+        log.info("ActivityCog loaded")
+
+    def _start_maintenance(self):
+        """Start the maintenance task with proper error handling"""
+        try:
+            self.maintenance.start()
+            log.info("Maintenance task started")
+        except Exception as e:
+            log.error(f"Failed to start maintenance task: {e}")
 
     # ───────────────────── generic helpers ─────────────────────
     async def _set_activity(self, uid: int, *, streak: int,
@@ -157,150 +170,182 @@ class ActivityCog(commands.Cog):
     # ───────────────────── maintenance ─────────────────────
     @tasks.loop(hours=24, reconnect=True)
     async def maintenance(self):
-        await self.bot.wait_until_ready()
-        while self.db.pool is None:
+        """Main maintenance task - runs once per day"""
+        # Wait for bot to be ready with proper error handling
+        try:
+            await self._wait_for_ready()
+        except Exception as e:
+            log.error(f"Error waiting for bot ready: {e}")
+            return
+            
+        try:
+            await self._maintenance_cycle()
+        except Exception as e:
+            log.error(f"Error in maintenance cycle: {e}")
+            await self._log(f"❌ Maintenance cycle failed: {e}")
+
+    async def _wait_for_ready(self):
+        """Wait for bot to be ready with timeout and error handling"""
+        timeout = 300  # 5 minutes timeout
+        start_time = asyncio.get_event_loop().time()
+        
+        while not self.bot.is_ready():
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                raise TimeoutError("Bot not ready within timeout period")
             await asyncio.sleep(5)
-        await self._maintenance_cycle()
+            
+        # Additional check for database
+        while self.db.pool is None:
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                raise TimeoutError("Database not ready within timeout period")
+            await asyncio.sleep(5)
 
     async def _maintenance_cycle(self):
-        # --- skip if today's cycle already executed ---
-        already = await self.db.pool.fetchval(
-            """
-            SELECT 1 FROM activity_audit
-             WHERE event_type = 'maintenance'
-               AND DATE(timestamp) = CURRENT_DATE
-             LIMIT 1
-            """
-        )
-        if already:
-            log.info("[activity] Daily maintenance already ran today – skipping.")
-            return
+        """Execute the daily maintenance cycle"""
+        try:
+            # --- skip if today's cycle already executed ---
+            already = await self.db.pool.fetchval(
+                """
+                SELECT 1 FROM activity_audit
+                 WHERE event_type = 'maintenance'
+                   AND DATE(timestamp) = CURRENT_DATE
+                 LIMIT 1
+                """
+            )
+            if already:
+                log.info("[activity] Daily maintenance already ran today – skipping.")
+                return
 
-        guild = self.bot.get_guild(GUILD_ID)
-        if guild is None:
-            return
+            guild = self.bot.get_guild(GUILD_ID)
+            if guild is None:
+                log.warning("Guild not found")
+                return
 
-        role_active   = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
-        role_inactive = guild.get_role(INACTIVE_ROLE_ID)
-        today         = date.today()
+            role_active   = guild.get_role(ACTIVE_MEMBER_ROLE_ID)
+            role_inactive = guild.get_role(INACTIVE_ROLE_ID)
+            today         = date.today()
 
-        stats = dict(promoted=0, demote_warn=0, kick_warn=0,
-                     demoted=0, kicked=0, unmarked=0)
+            stats = dict(promoted=0, demote_warn=0, kick_warn=0,
+                         demoted=0, kicked=0, unmarked=0)
 
-        recs: Dict[int, Dict] = await self.db.get_all_activity()
-        exempt_ids = set(await self.db.get_exempt_users())
+            recs: Dict[int, Dict] = await self.db.get_all_activity()
+            exempt_ids = set(await self.db.get_exempt_users())
 
-        for uid, rec in recs.items():
-            m = guild.get_member(uid)
-            if not m or m.bot or uid in exempt_ids:
-                continue
+            for uid, rec in recs.items():
+                m = guild.get_member(uid)
+                if not m or m.bot or uid in exempt_ids:
+                    continue
 
-            days_idle = (today - rec["date"]).days
-            exempt    = self._is_staff(m)
+                days_idle = (today - rec["date"]).days
+                exempt    = self._is_staff(m)
 
-            # ---------- promotion catch-up ----------
-            if (
-                rec["streak"] >= PROMOTE_STREAK
-                and role_active
-                and role_active not in m.roles
-            ):
-                try:
-                    await m.add_roles(role_active,
-                                      reason="Reached activity streak (catch-up)")
-                    stats["promoted"] += 1
-                    await self._log(f"⭐ Promoted {m} (catch-up)")
-                    await self._audit(m.id, "promote", "catch-up")
-                except Exception as e:
-                    await self._log(f"❌ Could not promote {m}: {e}")
+                # ---------- promotion catch-up ----------
+                if (
+                    rec["streak"] >= PROMOTE_STREAK
+                    and role_active
+                    and role_active not in m.roles
+                ):
+                    try:
+                        await m.add_roles(role_active,
+                                          reason="Reached activity streak (catch-up)")
+                        stats["promoted"] += 1
+                        await self._log(f"⭐ Promoted {m} (catch-up)")
+                        await self._audit(m.id, "promote", "catch-up")
+                    except Exception as e:
+                        await self._log(f"❌ Could not promote {m}: {e}")
 
-            # ---------- demotion warning ----------
-            if (
-                days_idle == WARN_BEFORE_DAYS
-                and role_active in m.roles
-                and not rec["warned"]
-            ):
-                left = INACTIVE_AFTER_DAYS - days_idle
-                msg = (
-                    f"⚠️  You have been inactive in **{guild.name}** for "
-                    f"**{days_idle} days**.\n"
-                    f"You will lose your **Active Member** role in **{left} day**."
-                )
-                ok = await self._safe_dm(m, msg, fallback_channel=INACTIVE_CH_ID)
-                stats["demote_warn"] += 1
-                await self._log(f"⚠️ Demotion warning to {m} "
-                                f"(DM {'ok' if ok else 'fallback'})")
-                await self._audit(m.id, "demote_warn", f"idle={days_idle}")
-                await self._set_activity(uid, streak=rec["streak"],
-                                         last_date=rec["date"], warned=True)
-
-            # ---------- demote ----------
-            if days_idle >= INACTIVE_AFTER_DAYS and role_active in m.roles:
-                try:
-                    await m.remove_roles(role_active, reason="Inactive > 5 days")
-                    stats["demoted"] += 1
-                    await self._log(f"🔻 Demoted {m} (idle {days_idle}d)")
-                    await self._audit(m.id, "demote", f"idle={days_idle}")
-                except Exception as e:
-                    await self._log(f"❌ Could not demote {m}: {e}")
-                await self._set_activity(uid, streak=0, last_date=rec["date"],
-                                         warned=False)
-
-            # ---------- kick warnings ----------
-            if (
-                not exempt
-                and days_idle in (KICK_WARN_D1, KICK_WARN_D2)
-            ):
-                left = KICK_AFTER_DAYS - days_idle
-                msg = (
-                    f"⚠️  You have been inactive in **{guild.name}** "
-                    f"for **{days_idle} days**.\n"
-                    f"You will be removed from the server in **{left} days**."
-                )
-                ok = await self._safe_dm(m, msg, fallback_channel=INACTIVE_CH_ID)
-                stats["kick_warn"] += 1
-                await self._log(f"⚠️ Kick warning to {m} "
-                                f"(DM {'ok' if ok else 'fallback'})")
-                await self._audit(m.id, "kick_warn", f"idle={days_idle}")
-
-            # ---------- kick ----------
-            if not exempt and days_idle >= KICK_AFTER_DAYS:
-                try:
-                    kick_msg = (
-                        f"👢 You have been removed from **{guild.name}** "
-                        f"due to 14 days of inactivity.\n"
-                        "You are welcome to re-join at any time!"
+                # ---------- demotion warning ----------
+                if (
+                    days_idle == WARN_BEFORE_DAYS
+                    and role_active in m.roles
+                    and not rec["warned"]
+                ):
+                    left = INACTIVE_AFTER_DAYS - days_idle
+                    msg = (
+                        f"⚠️  You have been inactive in **{guild.name}** for "
+                        f"**{days_idle} days**.\n"
+                        f"You will lose your **Active Member** role in **{left} day**."
                     )
-                    await self._safe_dm(m, kick_msg,
-                                        fallback_channel=INACTIVE_CH_ID)
-                    await guild.kick(m, reason="Inactive ≥14 days")
-                    stats["kicked"] += 1
-                    await self._log(f"👢 Kicked {m} (idle {days_idle}d)")
-                    await self._audit(m.id, "kick", f"idle={days_idle}")
-                except Exception as e:
-                    await self._log(f"❌ Could not kick {m}: {e}")
+                    ok = await self._safe_dm(m, msg, fallback_channel=INACTIVE_CH_ID)
+                    stats["demote_warn"] += 1
+                    await self._log(f"⚠️ Demotion warning to {m} "
+                                    f"(DM {'ok' if ok else 'fallback'})")
+                    await self._audit(m.id, "demote_warn", f"idle={days_idle}")
+                    await self._set_activity(uid, streak=rec["streak"],
+                                             last_date=rec["date"], warned=True)
 
-        # ---------- remove expired inactive roles ----------
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        for row in await self.db.get_expired_inactive(now_ts):
-            mem = guild.get_member(row["user_id"])
-            if not mem:
-                await self.db.remove_inactive(row["user_id"])
-                continue
-            if role_inactive and role_inactive in mem.roles:
-                try:
-                    await mem.remove_roles(role_inactive,
-                                           reason="Inactive period elapsed")
-                    stats["unmarked"] += 1
-                    await self._audit(mem.id, "unmark_inactive", "period over")
-                except Exception as e:
-                    await self._log(f"❌ Could not unmark {mem}: {e}")
-            await self._set_activity(mem.id, streak=0,
-                                     last_date=today, warned=False)
-            await self.db.remove_inactive(mem.id)
+                # ---------- demote ----------
+                if days_idle >= INACTIVE_AFTER_DAYS and role_active in m.roles:
+                    try:
+                        await m.remove_roles(role_active, reason="Inactive > 5 days")
+                        stats["demoted"] += 1
+                        await self._log(f"🔻 Demoted {m} (idle {days_idle}d)")
+                        await self._audit(m.id, "demote", f"idle={days_idle}")
+                    except Exception as e:
+                        await self._log(f"❌ Could not demote {m}: {e}")
+                    await self._set_activity(uid, streak=0, last_date=rec["date"],
+                                             warned=False)
 
-        await self._log(f"[Daily] {stats}")
-        # mark that today's maintenance ran
-        await self._audit(0, "maintenance", "daily cycle")
+                # ---------- kick warnings ----------
+                if (
+                    not exempt
+                    and days_idle in (KICK_WARN_D1, KICK_WARN_D2)
+                ):
+                    left = KICK_AFTER_DAYS - days_idle
+                    msg = (
+                        f"⚠️  You have been inactive in **{guild.name}** "
+                        f"for **{days_idle} days**.\n"
+                        f"You will be removed from the server in **{left} days**."
+                    )
+                    ok = await self._safe_dm(m, msg, fallback_channel=INACTIVE_CH_ID)
+                    stats["kick_warn"] += 1
+                    await self._log(f"⚠️ Kick warning to {m} "
+                                    f"(DM {'ok' if ok else 'fallback'})")
+                    await self._audit(m.id, "kick_warn", f"idle={days_idle}")
+
+                # ---------- kick ----------
+                if not exempt and days_idle >= KICK_AFTER_DAYS:
+                    try:
+                        kick_msg = (
+                            f"👢 You have been removed from **{guild.name}** "
+                            f"due to 14 days of inactivity.\n"
+                            "You are welcome to re-join at any time!"
+                        )
+                        await self._safe_dm(m, kick_msg,
+                                            fallback_channel=INACTIVE_CH_ID)
+                        await guild.kick(m, reason="Inactive ≥14 days")
+                        stats["kicked"] += 1
+                        await self._log(f"👢 Kicked {m} (idle {days_idle}d)")
+                        await self._audit(m.id, "kick", f"idle={days_idle}")
+                    except Exception as e:
+                        await self._log(f"❌ Could not kick {m}: {e}")
+
+            # ---------- remove expired inactive roles ----------
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            for row in await self.db.get_expired_inactive(now_ts):
+                mem = guild.get_member(row["user_id"])
+                if not mem:
+                    await self.db.remove_inactive(row["user_id"])
+                    continue
+                if role_inactive and role_inactive in mem.roles:
+                    try:
+                        await mem.remove_roles(role_inactive,
+                                               reason="Inactive period elapsed")
+                        stats["unmarked"] += 1
+                        await self._audit(mem.id, "unmark_inactive", "period over")
+                    except Exception as e:
+                        await self._log(f"❌ Could not unmark {mem}: {e}")
+                await self._set_activity(mem.id, streak=0,
+                                         last_date=today, warned=False)
+                await self.db.remove_inactive(mem.id)
+
+            await self._log(f"[Daily] {stats}")
+            # mark that today's maintenance ran
+            await self._audit(0, "maintenance", "daily cycle")
+            
+        except Exception as e:
+            log.error(f"Maintenance cycle error: {e}")
+            raise
 
     # ───────────────────── Slash-commands (existing) ─────────────────────
     activity_group = app_commands.Group(name="activity", description="Activity tools")
@@ -421,18 +466,19 @@ class ActivityCog(commands.Cog):
 
         await self.db.add_inactive(mem.id, until_ts)
         await mem.send(
-            f"📴 You are marked inactive for **{period.name}**.\n"
+            f"ellular You are marked inactive for **{period.name}**.\n"
             f"Reason: {reason}\nUntil <t:{until_ts}:R>."
         )
         await self._audit(mem.id, "set_inactive", f"{period.name}: {reason}")
-        await self._log(f"📴 {mem} set inactive for {period.name} ({reason})")
+        await self._log(f"ellular {mem} set inactive for {period.name} ({reason})")
         await inter.followup.send("You are now marked inactive – take care!",
                                   ephemeral=True)
 
     # -----------------------------------------------------------------
 
     def cog_unload(self):
-        self.maintenance.cancel()
+        if hasattr(self, 'maintenance') and self.maintenance.is_running():
+            self.maintenance.cancel()
         log.info("ActivityCog unloaded")
 
 
