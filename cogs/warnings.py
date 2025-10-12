@@ -1,4 +1,4 @@
-# cogs/warnings.py
+## cogs/warnings.py
 import discord
 from discord.ext import commands, tasks
 from typing import Optional
@@ -34,7 +34,7 @@ class WarningSystem(commands.Cog):
                 """
             )
             
-            # Create warning config table
+            # Create warning config table with proper column handling
             await self.db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS warning_config (
@@ -54,7 +54,8 @@ class WarningSystem(commands.Cog):
             logging.error(f"Error initializing warning system: {e}")
 
     async def cog_unload(self):
-        self.check_expired_warnings.cancel()
+        if hasattr(self, 'check_expired_warnings') and self.check_expired_warnings.is_running():
+            self.check_expired_warnings.cancel()
 
     @tasks.loop(hours=1)
     async def check_expired_warnings(self):
@@ -99,7 +100,7 @@ class WarningSystem(commands.Cog):
         """Get next case ID"""
         try:
             result = await self.db.fetch_one("SELECT COALESCE(MAX(case_id), 0) as max_id FROM warnings")
-            return (result['max_id'] if result['max_id'] else 0) + 1
+            return (result['max_id'] if result and result['max_id'] else 0) + 1
         except Exception as e:
             logging.error(f"Failed to get next case ID: {e}")
             # Fallback to timestamp-based ID
@@ -581,7 +582,7 @@ class WarningSystem(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def config_warnings(self, ctx, setting: str, value: str):
         """Configure warning system settings"""
-        valid_settings = ['dm_users', 'auto_moderation', 'log_channel', 'escalate_3_warns', 'escalate_5_warns']
+        valid_settings = ['dm_users', 'auto_moderation', 'log_channel_id', 'escalate_3_warns', 'escalate_5_warns']
         if setting not in valid_settings:
             await ctx.send(f"Valid settings: {', '.join(valid_settings)}", ephemeral=True)
             return
@@ -601,9 +602,14 @@ class WarningSystem(commands.Cog):
                     """,
                     ctx.guild.id
                 )
+                # Refresh current after insert
+                current = await self.db.fetch_one(
+                    "SELECT * FROM warning_config WHERE guild_id = $1",
+                    ctx.guild.id
+                )
             
-            # Update setting
-            if setting == 'log_channel':
+            # Update setting - use proper column names
+            if setting == 'log_channel_id':
                 try:
                     channel_id = int(value)
                     channel = ctx.guild.get_channel(channel_id)
@@ -615,7 +621,7 @@ class WarningSystem(commands.Cog):
                     return
                     
                 await self.db.execute(
-                    f"UPDATE warning_config SET {setting} = $1 WHERE guild_id = $2",
+                    "UPDATE warning_config SET log_channel_id = $1 WHERE guild_id = $2",
                     channel_id, ctx.guild.id
                 )
             elif setting in ['dm_users', 'auto_moderation', 'escalate_3_warns', 'escalate_5_warns']:
@@ -640,14 +646,14 @@ class WarningSystem(commands.Cog):
                 "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1",
                 ctx.guild.id
             )
-            total = total_result['count'] if total_result else 0
+            total = total_result['count'] if total_result and 'count' in total_result else 0
             
             # Active warnings
             active_result = await self.db.fetch_one(
                 "SELECT COUNT(*) as count FROM warnings WHERE guild_id = $1 AND expired = FALSE",
                 ctx.guild.id
             )
-            active = active_result['count'] if active_result else 0
+            active = active_result['count'] if active_result and 'count' in active_result else 0
             
             # Top moderators
             top_mods = await self.db.fetch_all(
@@ -680,7 +686,7 @@ class WarningSystem(commands.Cog):
             )
             embed.add_field(name="Total Warnings", value=str(total), inline=True)
             embed.add_field(name="Active Warnings", value=str(active), inline=True)
-            embed.add_field(name="Expired Warnings", value=str(total-active), inline=True)
+            embed.add_field(name="Expired Warnings", value=str(max(0, total-active)), inline=True)
             
             if top_mods:
                 mod_list = []
