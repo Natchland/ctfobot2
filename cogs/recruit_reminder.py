@@ -2,7 +2,7 @@
 # Production-ready • discord.py ≥ 2.3 • 2024-10-05
 #
 #  • A message in the #recruit channel lets recruitment staff press ✅ Accept
-#    to “take the shift” and locks further posts for 6 h.
+#    to "take the shift" and locks further posts for 6 h.
 #  • The button is PERSISTENT – survives bot restarts.
 #  • Table `recruit_reminder` is created automatically.
 #  • Fix: view is re-attached only after the DB table is ready, so the button
@@ -59,8 +59,15 @@ class RecruitReminder(commands.Cog):
         # will be set after the table exists & pool ready
         self._table_ready = asyncio.Event()
 
+        # Start the update task only after table is ready
+        self.update_task: Optional[asyncio.Task] = None
+        asyncio.create_task(self._prepare_and_start())
+
+    async def _prepare_and_start(self):
+        """Prepare table and start update task."""
+        await self._prepare_table()
         self.update_message.start()
-        asyncio.create_task(self._prepare_table())
+        self.update_task = self.update_message.get_task()
 
     # ═════════════════ DB helpers ═════════════════
     async def _prepare_table(self):
@@ -78,6 +85,8 @@ class RecruitReminder(commands.Cog):
         if self.db.pool is None:
             return {"message_id": None, "claimed_by": None, "end_ts": None}
 
+        await self._table_ready.wait()
+        
         async with self.db.pool.acquire() as conn:
             try:
                 row = await conn.fetchrow(GET_SQL)
@@ -89,6 +98,8 @@ class RecruitReminder(commands.Cog):
     async def _set_state(self, *, message_id, claimed_by, end_ts):
         if self.db.pool is None:
             return
+        await self._table_ready.wait()
+        
         async with self.db.pool.acquire() as conn:
             try:
                 await conn.execute(SET_SQL, message_id, claimed_by, end_ts)
@@ -116,7 +127,7 @@ class RecruitReminder(commands.Cog):
                 or (role and role in inter.user.roles)
             ):
                 return await inter.response.send_message(
-                    "You’re not recruitment staff.", ephemeral=True
+                    "You're not recruitment staff.", ephemeral=True
                 )
 
             await inter.response.defer(ephemeral=True)
@@ -146,7 +157,7 @@ class RecruitReminder(commands.Cog):
                     await inter.followup.send(
                         "Something went wrong – try again later.", ephemeral=True
                     )
-                except discord.HTTPException:
+                except (discord.HTTPException, discord.NotFound):
                     pass
 
     # ═════════════════ Periodic updater ═════════════════
@@ -163,12 +174,17 @@ class RecruitReminder(commands.Cog):
 
         # ---------- no message stored – create ----------
         if state["message_id"] is None:
-            msg = await channel.send(
-                f"<@&{RECRUITMENT_ROLE_ID}> "
-                "Click **Accept** below if you’re available to send out recruitment posts!",
-                view=self.AcceptView(self),
-            )
-            await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
+            try:
+                msg = await channel.send(
+                    f"<@&{RECRUITMENT_ROLE_ID}> "
+                    "Click **Accept** below if you're available to send out recruitment posts!",
+                    view=self.AcceptView(self),
+                )
+                await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
+            except discord.Forbidden:
+                log.error("Bot lacks permissions to send message in recruit channel")
+            except discord.HTTPException as e:
+                log.error("Failed to send recruit message: %s", e)
             return
 
         # ---------- fetch stored message ----------
@@ -177,31 +193,46 @@ class RecruitReminder(commands.Cog):
         except discord.NotFound:                               # message deleted
             await self._set_state(message_id=None, claimed_by=None, end_ts=None)
             return
+        except discord.Forbidden:
+            log.error("Bot lacks permissions to fetch message in recruit channel")
+            return
+        except discord.HTTPException as e:
+            log.error("Failed to fetch recruit message: %s", e)
+            return
 
         # ---------- update content ----------
         if state["end_ts"]:                                    # shift active
             if now_ts >= state["end_ts"]:                      # shift expired
-                await msg.edit(
-                    content=(
-                        f"<@&{RECRUITMENT_ROLE_ID}> "
-                        "Click **Accept** below if you’re available to send out recruitment posts!"
-                    ),
-                    view=self.AcceptView(self),
-                )
-                await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
+                try:
+                    await msg.edit(
+                        content=(
+                            f"<@&{RECRUITMENT_ROLE_ID}> "
+                            "Click **Accept** below if you're available to send out recruitment posts!"
+                        ),
+                        view=self.AcceptView(self),
+                    )
+                    await self._set_state(message_id=msg.id, claimed_by=None, end_ts=None)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException) as e:
+                    log.error("Failed to update expired shift message: %s", e)
             else:                                              # still locked
                 remaining = state["end_ts"] - now_ts
                 hrs, rem  = divmod(remaining, 3600)
                 mins      = rem // 60
-                await msg.edit(
-                    content=(
-                        f"✅ <@{state['claimed_by']}> has sent out recruitment — "
-                        f"next recruitment posts can be sent in **{hrs} h {mins:02} m**."
+                try:
+                    await msg.edit(
+                        content=(
+                            f"✅ <@{state['claimed_by']}> has sent out recruitment — "
+                            f"next recruitment posts can be sent in **{hrs} h {mins:02} m**."
+                        )
                     )
-                )
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException) as e:
+                    log.error("Failed to update locked shift message: %s", e)
         else:                                                  # idle
             if not msg.components:
-                await msg.edit(view=self.AcceptView(self))
+                try:
+                    await msg.edit(view=self.AcceptView(self))
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException) as e:
+                    log.error("Failed to add view to idle message: %s", e)
 
     # ═════════════════ Persist view on reboot ═════════════════
     @commands.Cog.listener()
@@ -230,7 +261,8 @@ class RecruitReminder(commands.Cog):
 
     # ═════════════════ teardown ═════════════════
     def cog_unload(self):
-        self.update_message.cancel()
+        if self.update_message.is_running():
+            self.update_message.cancel()
         log.info("RecruitReminder unloaded")
 
 
