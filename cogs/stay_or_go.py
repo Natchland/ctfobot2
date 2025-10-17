@@ -43,18 +43,21 @@ class StayOrGo(commands.Cog):
                 reason="Auto-created for stay-or-go system"
             )
 
-    @commands.command(name="startstayorgo")
-    @commands.has_permissions(administrator=True)
-    async def start_stay_or_go(self, ctx: commands.Context):
-        """Start the stay or go system - only admins can use this"""
-        if self.active:
-            await ctx.send("Stay-or-go system is already active!")
-            return
+        # Register the slash command
+        @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
+        @discord.app_commands.default_permissions(administrator=True)
+        async def start_stay_or_go_command(interaction: discord.Interaction):
+            if self.active:
+                await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
+                return
 
-        # Try to find existing message or create new one
-        await self.find_or_create_message()
-        self.active = True
-        await ctx.send("Stay-or-go system activated! Message is now live.")
+            # Try to find existing message or create new one
+            await self.find_or_create_message()
+            self.active = True
+            await interaction.response.send_message("Stay-or-go system activated! Message is now live.", ephemeral=True)
+
+        # Add command to the bot's tree for the specific guild
+        self.bot.tree.add_command(start_stay_or_go_command, guild=guild, override=True)
 
     async def find_or_create_message(self):
         """Find existing message or create a new one"""
