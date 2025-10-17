@@ -28,14 +28,20 @@ class StayOrGo(commands.Cog):
         self.stay_role = None
         self.message = None
         self.active = False
+        # Get guild ID from your existing constant
+        self.guild_id = 1377035207777194005  # You can also pass this as a parameter if needed
 
     async def cog_load(self) -> None:
-        self.target_channel = self.bot.get_channel(CHANNEL_ID)
+        guild = self.bot.get_guild(self.guild_id)
+        if not guild:
+            print("Could not find guild. Make sure GUILD_ID is correct.")
+            return
+            
+        self.target_channel = guild.get_channel(CHANNEL_ID)
         if not self.target_channel:
             print("Could not find target channel. Make sure CHANNEL_ID is correct.")
             return
 
-        guild = self.target_channel.guild
         self.stay_role = discord.utils.get(guild.roles, name=ROLE_NAME)
         if not self.stay_role:
             self.stay_role = await guild.create_role(
@@ -47,6 +53,10 @@ class StayOrGo(commands.Cog):
         @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
         @discord.app_commands.default_permissions(administrator=True)
         async def start_stay_or_go_command(interaction: discord.Interaction):
+            if interaction.guild.id != self.guild_id:
+                await interaction.response.send_message("This command is not available in this server.", ephemeral=True)
+                return
+                
             if self.active:
                 await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
                 return
