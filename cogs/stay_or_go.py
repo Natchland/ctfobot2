@@ -17,6 +17,7 @@ EMBED_DESCRIPTION = (
     "This will give you the **Staying Role** and protect your account!"
 )
 REACTION_EMOJI = "✅"
+GUILD_ID = 1377035207777194005  # Your guild ID
 # ——————————————————————————————————————————————————————————
 
 
@@ -30,22 +31,33 @@ class StayOrGo(commands.Cog):
         self.active = False
 
     async def cog_load(self) -> None:
-        guild = self.bot.get_guild(1377035207777194005)  # Use your actual guild ID
+        guild = self.bot.get_guild(GUILD_ID)
         if not guild:
-            print("Could not find guild. Make sure GUILD_ID is correct.")
+            print(f"Could not find guild {GUILD_ID}")
             return
             
         self.target_channel = guild.get_channel(CHANNEL_ID)
         if not self.target_channel:
-            print("Could not find target channel. Make sure CHANNEL_ID is correct.")
-            return
+            print(f"Could not find target channel {CHANNEL_ID} in guild {guild.name}")
+            # Try to fetch it instead
+            try:
+                self.target_channel = await guild.fetch_channel(CHANNEL_ID)
+                print(f"Successfully fetched channel {CHANNEL_ID}")
+            except Exception as e:
+                print(f"Could not fetch channel {CHANNEL_ID}: {e}")
+                return
 
         self.stay_role = discord.utils.get(guild.roles, name=ROLE_NAME)
         if not self.stay_role:
-            self.stay_role = await guild.create_role(
-                name=ROLE_NAME,
-                reason="Auto-created for stay-or-go system"
-            )
+            try:
+                self.stay_role = await guild.create_role(
+                    name=ROLE_NAME,
+                    reason="Auto-created for stay-or-go system"
+                )
+                print(f"Created role: {ROLE_NAME}")
+            except Exception as e:
+                print(f"Failed to create role {ROLE_NAME}: {e}")
+                return
 
     @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
     async def start_stay_or_go_command(self, interaction: discord.Interaction):
@@ -59,6 +71,11 @@ class StayOrGo(commands.Cog):
             await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
             return
 
+        # Make sure we have a target channel
+        if not self.target_channel:
+            await interaction.response.send_message("Error: Target channel not found!", ephemeral=True)
+            return
+
         # Try to find existing message or create new one
         await self.find_or_create_message()
         self.active = True
@@ -66,24 +83,31 @@ class StayOrGo(commands.Cog):
 
     async def find_or_create_message(self):
         """Find existing message or create a new one"""
+        if not self.target_channel:
+            print("No target channel available")
+            return
+            
         # First, try to find existing message by looking through channel history
-        async for message in self.target_channel.history(limit=50):
-            if (message.author == self.bot.user and 
-                message.embeds and 
-                message.embeds[0].title == EMBED_TITLE):
-                self.message = message
-                print("Found existing stay-or-go message")
-                return
+        try:
+            async for message in self.target_channel.history(limit=50):
+                if (message.author == self.bot.user and 
+                    message.embeds and 
+                    message.embeds[0].title == EMBED_TITLE):
+                    self.message = message
+                    print("Found existing stay-or-go message")
+                    return
 
-        # If not found, create new message
-        embed = discord.Embed(
-            title=EMBED_TITLE,
-            description=EMBED_DESCRIPTION,
-            color=discord.Color.red()
-        )
-        self.message = await self.target_channel.send(embed=embed)
-        await self.message.add_reaction(REACTION_EMOJI)
-        print("Created new stay-or-go message")
+            # If not found, create new message
+            embed = discord.Embed(
+                title=EMBED_TITLE,
+                description=EMBED_DESCRIPTION,
+                color=discord.Color.red()
+            )
+            self.message = await self.target_channel.send(embed=embed)
+            await self.message.add_reaction(REACTION_EMOJI)
+            print("Created new stay-or-go message")
+        except Exception as e:
+            print(f"Error in find_or_create_message: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -123,6 +147,6 @@ async def setup(bot: commands.Bot, db: Database) -> None:
     cog = StayOrGo(bot, db)
     await bot.add_cog(cog)
     # Register the command with the bot's tree for the guild
-    guild = bot.get_guild(1377035207777194005)  # Use your actual guild ID
+    guild = bot.get_guild(GUILD_ID)
     if guild:
         bot.tree.add_command(cog.start_stay_or_go_command, guild=guild)
