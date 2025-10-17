@@ -28,11 +28,9 @@ class StayOrGo(commands.Cog):
         self.stay_role = None
         self.message = None
         self.active = False
-        # Get guild ID from your existing constant
-        self.guild_id = 1377035207777194005  # You can also pass this as a parameter if needed
 
     async def cog_load(self) -> None:
-        guild = self.bot.get_guild(self.guild_id)
+        guild = self.bot.get_guild(1377035207777194005)  # Use your actual guild ID
         if not guild:
             print("Could not find guild. Make sure GUILD_ID is correct.")
             return
@@ -49,25 +47,22 @@ class StayOrGo(commands.Cog):
                 reason="Auto-created for stay-or-go system"
             )
 
-        # Register the slash command
-        @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
-        @discord.app_commands.default_permissions(administrator=True)
-        async def start_stay_or_go_command(interaction: discord.Interaction):
-            if interaction.guild.id != self.guild_id:
-                await interaction.response.send_message("This command is not available in this server.", ephemeral=True)
-                return
-                
-            if self.active:
-                await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
-                return
+    @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
+    async def start_stay_or_go_command(self, interaction: discord.Interaction):
+        # Check admin permissions
+        if not (interaction.user.guild_permissions.administrator or 
+                interaction.user.id == interaction.guild.owner_id):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
 
-            # Try to find existing message or create new one
-            await self.find_or_create_message()
-            self.active = True
-            await interaction.response.send_message("Stay-or-go system activated! Message is now live.", ephemeral=True)
+        if self.active:
+            await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
+            return
 
-        # Add command to the bot's tree for the specific guild
-        self.bot.tree.add_command(start_stay_or_go_command, guild=guild, override=True)
+        # Try to find existing message or create new one
+        await self.find_or_create_message()
+        self.active = True
+        await interaction.response.send_message("Stay-or-go system activated! Message is now live.", ephemeral=True)
 
     async def find_or_create_message(self):
         """Find existing message or create a new one"""
@@ -125,4 +120,9 @@ class StayOrGo(commands.Cog):
                 print(f"Failed to assign role: {e}")
 
 async def setup(bot: commands.Bot, db: Database) -> None:
-    await bot.add_cog(StayOrGo(bot, db))
+    cog = StayOrGo(bot, db)
+    await bot.add_cog(cog)
+    # Register the command with the bot's tree for the guild
+    guild = bot.get_guild(1377035207777194005)  # Use your actual guild ID
+    if guild:
+        bot.tree.add_command(cog.start_stay_or_go_command, guild=guild)
