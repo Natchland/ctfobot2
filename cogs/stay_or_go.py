@@ -10,7 +10,7 @@ from db import Database
 # ————————————————————— Configurable ———————————————————————
 CHANNEL_ID = 1378080948259786782  # Set your desired channel ID here
 ROLE_NAME = "Staying Role"
-EMBED_TITLE = "⚠️ Stay or Go? ⚠️"
+EMBED_TITLE = "⚠️ Do you wish to stick around after the cleanup? ⚠️"
 EMBED_DESCRIPTION = (
     "We're cleaning up inactive members soon.\n"
     "If you wish to remain active and not be kicked, please click the ✅ below.\n"
