@@ -31,21 +31,41 @@ class StayOrGo(commands.Cog):
         self.active = False
 
     async def cog_load(self) -> None:
+        # Don't do channel setup here, wait for on_ready
+        pass
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Setup channel and role when bot is fully ready"""
+        if self.target_channel is not None:  # Already setup
+            return
+            
+        print(f"[stay_or_go] Setting up... Guild ID: {GUILD_ID}, Channel ID: {CHANNEL_ID}")
+        
         guild = self.bot.get_guild(GUILD_ID)
         if not guild:
-            print(f"Could not find guild {GUILD_ID}")
+            print(f"[stay_or_go] Could not find guild {GUILD_ID}")
             return
+            
+        print(f"[stay_or_go] Found guild: {guild.name}")
+        
+        # List all channels for debugging
+        print(f"[stay_or_go] Available channels in guild:")
+        for channel in guild.channels:
+            print(f"  - {channel.name} ({channel.id}) - Type: {type(channel)}")
             
         self.target_channel = guild.get_channel(CHANNEL_ID)
         if not self.target_channel:
-            print(f"Could not find target channel {CHANNEL_ID} in guild {guild.name}")
-            # Try to fetch it instead
+            print(f"[stay_or_go] Could not find target channel {CHANNEL_ID} using get_channel")
+            # Try fetching it
             try:
                 self.target_channel = await guild.fetch_channel(CHANNEL_ID)
-                print(f"Successfully fetched channel {CHANNEL_ID}")
+                print(f"[stay_or_go] Successfully fetched channel via fetch_channel")
             except Exception as e:
-                print(f"Could not fetch channel {CHANNEL_ID}: {e}")
+                print(f"[stay_or_go] Could not fetch channel {CHANNEL_ID}: {e}")
                 return
+
+        print(f"[stay_or_go] Found target channel: {self.target_channel.name}")
 
         self.stay_role = discord.utils.get(guild.roles, name=ROLE_NAME)
         if not self.stay_role:
@@ -54,10 +74,12 @@ class StayOrGo(commands.Cog):
                     name=ROLE_NAME,
                     reason="Auto-created for stay-or-go system"
                 )
-                print(f"Created role: {ROLE_NAME}")
+                print(f"[stay_or_go] Created role: {ROLE_NAME}")
             except Exception as e:
-                print(f"Failed to create role {ROLE_NAME}: {e}")
+                print(f"[stay_or_go] Failed to create role {ROLE_NAME}: {e}")
                 return
+        else:
+            print(f"[stay_or_go] Found existing role: {ROLE_NAME}")
 
     @discord.app_commands.command(name="startstayorgo", description="Start the stay or go system")
     async def start_stay_or_go_command(self, interaction: discord.Interaction):
@@ -67,13 +89,13 @@ class StayOrGo(commands.Cog):
             await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
             return
 
-        if self.active:
-            await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
+        # Make sure setup is complete
+        if not self.target_channel:
+            await interaction.response.send_message("Bot not fully initialized yet. Please try again in a moment.", ephemeral=True)
             return
 
-        # Make sure we have a target channel
-        if not self.target_channel:
-            await interaction.response.send_message("Error: Target channel not found!", ephemeral=True)
+        if self.active:
+            await interaction.response.send_message("Stay-or-go system is already active!", ephemeral=True)
             return
 
         # Try to find existing message or create new one
@@ -84,20 +106,22 @@ class StayOrGo(commands.Cog):
     async def find_or_create_message(self):
         """Find existing message or create a new one"""
         if not self.target_channel:
-            print("No target channel available")
+            print("[stay_or_go] No target channel available in find_or_create_message")
             return
             
         # First, try to find existing message by looking through channel history
         try:
+            print(f"[stay_or_go] Searching channel {self.target_channel.name} for existing message...")
             async for message in self.target_channel.history(limit=50):
                 if (message.author == self.bot.user and 
                     message.embeds and 
                     message.embeds[0].title == EMBED_TITLE):
                     self.message = message
-                    print("Found existing stay-or-go message")
+                    print("[stay_or_go] Found existing stay-or-go message")
                     return
 
             # If not found, create new message
+            print("[stay_or_go] Creating new stay-or-go message...")
             embed = discord.Embed(
                 title=EMBED_TITLE,
                 description=EMBED_DESCRIPTION,
@@ -105,9 +129,9 @@ class StayOrGo(commands.Cog):
             )
             self.message = await self.target_channel.send(embed=embed)
             await self.message.add_reaction(REACTION_EMOJI)
-            print("Created new stay-or-go message")
+            print("[stay_or_go] Created new stay-or-go message")
         except Exception as e:
-            print(f"Error in find_or_create_message: {e}")
+            print(f"[stay_or_go] Error in find_or_create_message: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -139,9 +163,9 @@ class StayOrGo(commands.Cog):
         if self.stay_role and self.stay_role not in member.roles:
             try:
                 await member.add_roles(self.stay_role, reason="User confirmed staying")
-                print(f"Added {ROLE_NAME} to {member.display_name}")
+                print(f"[stay_or_go] Added {ROLE_NAME} to {member.display_name}")
             except Exception as e:
-                print(f"Failed to assign role: {e}")
+                print(f"[stay_or_go] Failed to assign role: {e}")
 
 async def setup(bot: commands.Bot, db: Database) -> None:
     cog = StayOrGo(bot, db)
@@ -150,3 +174,6 @@ async def setup(bot: commands.Bot, db: Database) -> None:
     guild = bot.get_guild(GUILD_ID)
     if guild:
         bot.tree.add_command(cog.start_stay_or_go_command, guild=guild)
+        print(f"[stay_or_go] Command registered for guild {guild.name}")
+    else:
+        print(f"[stay_or_go] Could not register command - guild not found")
