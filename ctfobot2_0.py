@@ -125,6 +125,7 @@ async def _run_bot() -> None:
         db,
         (
             "cogs.giveaways",
+            "cogs.stay_or_go",
             "cogs.member_forms",
             "cogs.staff_applications",
             "cogs.stats",
