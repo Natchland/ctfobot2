@@ -133,7 +133,6 @@ async def _run_bot() -> None:
             "cogs.welcome_general",
             "cogs.welcome_member",
             "cogs.quota",
-            "cogs.activity",
             "cogs.todo",
             "cogs.feedback",
             "cogs.codes",
