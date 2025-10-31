@@ -132,7 +132,6 @@ async def _run_bot() -> None:
             "cogs.stats",
             "cogs.steam_sync",
             "cogs.welcome_general",
-            "cogs.welcome_member",
             "cogs.xp",
         ),
     )
