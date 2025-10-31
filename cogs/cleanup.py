@@ -59,10 +59,17 @@ class CleanupCog(commands.Cog):
                             
                 processed += len(messages)
                 
-                # Update progress
+                # Update progress - handle case where message might be deleted
                 progress_embed.description = f"Processed: {processed} | Deleted: {deleted_count} | Failed: {failed_count}"
-                await progress_msg.edit(embed=progress_embed)
-                
+                try:
+                    await progress_msg.edit(embed=progress_embed)
+                except discord.NotFound:
+                    # Progress message was deleted, try to send a new one
+                    try:
+                        progress_msg = await ctx.channel.send(embed=progress_embed)
+                    except discord.HTTPException:
+                        pass  # Ignore if we can't send new progress message
+                        
                 # If we got less than 100 messages, we've reached the end
                 if len(messages) < 100:
                     break
@@ -70,13 +77,19 @@ class CleanupCog(commands.Cog):
             except discord.HTTPException as e:
                 failed_count += 1
                 
-        # Final update
+        # Final update - handle case where message might be deleted
         final_embed = discord.Embed(
             title="Channel Cleanup Complete",
             description=f"Processed: {processed} | Deleted: {deleted_count} | Failed: {failed_count}",
             color=discord.Color.green() if failed_count == 0 else discord.Color.red()
         )
-        await progress_msg.edit(embed=final_embed)
+        try:
+            await progress_msg.edit(embed=final_embed)
+        except discord.NotFound:
+            # Progress message was deleted, send a new completion message
+            await ctx.channel.send(embed=final_embed)
+        except discord.HTTPException:
+            pass  # Ignore if we can't update or send the final message
         
         # Send summary to command user
         await ctx.send(
