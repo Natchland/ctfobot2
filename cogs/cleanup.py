@@ -87,5 +87,5 @@ class CleanupCog(commands.Cog):
             ephemeral=True
         )
 
-async def setup(bot):
+async def setup(bot, db=None):
     await bot.add_cog(CleanupCog(bot))
