@@ -133,6 +133,7 @@ async def _run_bot() -> None:
             "cogs.steam_sync",
             "cogs.welcome_general",
             "cogs.xp",
+            "cogs.cleanup",  # Add this line
         ),
     )
     await bot.start(BOT_TOKEN)              # 3) live
