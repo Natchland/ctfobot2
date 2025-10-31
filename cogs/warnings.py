@@ -709,6 +709,113 @@ class WarningSystem(commands.Cog):
             logging.error(f"Failed to get warning stats: {e}")
             await ctx.send("Failed to retrieve statistics.", ephemeral=True)
 
+    @commands.hybrid_command(name="cleanup")
+    @commands.has_permissions(administrator=True)
+    async def cleanup_members(self, ctx):
+        """Kick members who don't have at least one of the specified roles"""
+        # Required role IDs
+        required_roles = {
+            1377103244089622719,  # admin
+            1377084533706588201,  # player management
+            1377077466513932338,  # group leader
+            1410659214959054988,  # recruitment
+            1383201150140022784,  # owner
+            1428892228205674572,  # staying role
+            1382462611160825876   # Pig Sir Oinkers
+        }
+        
+        # Role name mapping for readable messages
+        role_names = {
+            1377103244089622719: "Admin",
+            1377084533706588201: "Player Management",
+            1377077466513932338: "Group Leader",
+            1410659214959054988: "Recruitment",
+            1383201150140022784: "Owner",
+            1428892228205674572: "Staying Role",
+            1382462611160825876: "Pig Sir Oinkers"
+        }
+        
+        await ctx.send("Starting cleanup process... This may take a while.", ephemeral=True)
+        
+        kicked_count = 0
+        failed_kicks = []
+        processed_count = 0
+        
+        # Create embed for progress updates
+        progress_embed = discord.Embed(
+            title="Cleanup Progress",
+            description="Processing members...",
+            color=discord.Color.orange()
+        )
+        progress_msg = await ctx.channel.send(embed=progress_embed)
+        
+        # Process all members
+        for member in ctx.guild.members:
+            # Skip bots
+            if member.bot:
+                continue
+                
+            processed_count += 1
+            
+            # Update progress every 50 members
+            if processed_count % 50 == 0:
+                progress_embed.description = f"Processed {processed_count} members...\nKicked: {kicked_count}"
+                await progress_msg.edit(embed=progress_embed)
+            
+            # Check if member has any of the required roles
+            has_required_role = any(role.id in required_roles for role in member.roles)
+            
+            if not has_required_role:
+                try:
+                    # Try to kick the member
+                    await member.kick(reason="Cleanup: Does not have any required roles")
+                    kicked_count += 1
+                    
+                    # Log to a channel if configured
+                    config = self._get_guild_config(str(ctx.guild.id))
+                    if config.get('log_channel_id'):
+                        log_channel = ctx.guild.get_channel(config['log_channel_id'])
+                        if log_channel:
+                            try:
+                                await log_channel.send(
+                                    f"🧹 **Cleanup Kick**\n"
+                                    f"User: {member} ({member.id})\n"
+                                    f"Reason: Does not have any required roles"
+                                )
+                            except Exception:
+                                pass  # Ignore logging errors
+                except discord.Forbidden:
+                    failed_kicks.append(f"{member} (No permission to kick)")
+                except discord.HTTPException as e:
+                    failed_kicks.append(f"{member} (HTTP error: {e})")
+        
+        # Final update
+        result_embed = discord.Embed(
+            title="Cleanup Complete",
+            color=discord.Color.green() if kicked_count > 0 or len(failed_kicks) == 0 else discord.Color.red()
+        )
+        result_embed.add_field(name="Processed", value=str(processed_count), inline=True)
+        result_embed.add_field(name="Kicked", value=str(kicked_count), inline=True)
+        result_embed.add_field(name="Failed Kicks", value=str(len(failed_kicks)), inline=True)
+        
+        if failed_kicks:
+            # Show first 10 failed kicks
+            failed_list = "\n".join(failed_kicks[:10])
+            if len(failed_kicks) > 10:
+                failed_list += f"\n...and {len(failed_kicks) - 10} more"
+            result_embed.add_field(name="Failed Kicks", value=failed_list, inline=False)
+        
+        await progress_msg.edit(embed=result_embed)
+        
+        # Send summary to command user
+        await ctx.send(
+            f"Cleanup complete!\n"
+            f"Processed: {processed_count} members\n"
+            f"Kicked: {kicked_count} members\n"
+            f"Failed: {len(failed_kicks)} members",
+            ephemeral=True
+        )
+
 # Make sure the setup function accepts both parameters
 async def setup(bot, db=None):
     await bot.add_cog(WarningSystem(bot, db))
