@@ -124,21 +124,16 @@ async def _run_bot() -> None:
         bot,
         db,
         (
-            "cogs.giveaways",
-            "cogs.stay_or_go",
+            "cogs.codes",
+            "cogs.feedback",
             "cogs.member_forms",
+            "cogs.recruit_reminder",
             "cogs.staff_applications",
             "cogs.stats",
-            "cogs.recruit_reminder",
+            "cogs.steam_sync",
             "cogs.welcome_general",
             "cogs.welcome_member",
-            "cogs.quota",
-            "cogs.todo",
-            "cogs.feedback",
-            "cogs.codes",
-            "cogs.warnings",
-            "cogs.xp",                      # XP system
-            "cogs.steam_sync",
+            "cogs.xp",
         ),
     )
     await bot.start(BOT_TOKEN)              # 3) live
